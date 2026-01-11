@@ -18,6 +18,7 @@ def store_tokens(owner_user_id, x_user_id, token_data):
     access_token = token_data.get("access_token")
     refresh_token = token_data.get("refresh_token")
     expires_at = token_data.get("expires_at")
+    scope = token_data.get("scope")
 
     record = UserOAuthToken.query.filter_by(
         owner_user_id=owner_user_id, x_user_id=x_user_id
@@ -29,6 +30,8 @@ def store_tokens(owner_user_id, x_user_id, token_data):
     record.access_token = encrypt_value(access_token)
     record.refresh_token = encrypt_value(refresh_token) if refresh_token else record.refresh_token
     record.expires_at = expires_at
+    if scope:
+        record.scope = scope
     db.session.commit()
     return record
 

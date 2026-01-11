@@ -8,7 +8,7 @@ from app.extensions import db
 from app.models import ApiRequestLog, AnnotationDomain, AnnotationEntity, PostContextAnnotation, User, XPost, XUser
 from flask import session
 
-from app.blueprints.auth.token_helpers import call_x_api_with_refresh
+from app.blueprints.auth.token_helpers import call_x_api_with_refresh, get_current_user_token
 from app.utils.encrypt_decrypt import get_app_var
 
 
@@ -172,7 +172,7 @@ def _upsert_context_annotations(post_id: int, annotations: list[Mapping[str, Any
             )
 
 
-def _trim_response_body(body: str | None, limit: int = 20000) -> str | None:
+def _trim_response_body(body: str | None, limit: int = 200000) -> str | None:
     if body is None:
         return None
     return body[:limit]
@@ -183,6 +183,7 @@ def _log_api_request(
     url: str,
     status_code: int | None,
     response_body: str | None = None,
+    response_headers: dict[str, Any] | None = None,
     commit: bool = False,
 ) -> ApiRequestLog:
     record = ApiRequestLog(
@@ -191,6 +192,7 @@ def _log_api_request(
         url=url,
         status_code=status_code,
         response_body=_trim_response_body(response_body),
+        response_headers=response_headers,
     )
     db.session.add(record)
     db.session.flush()
@@ -266,6 +268,43 @@ def _upsert_x_user(payload: Mapping[str, Any]) -> XUser | None:
     return record
 
 
+def resolve_x_user_id(identifier: str | None) -> tuple[str | None, str | None]:
+    """Resolve a username or user id into a numeric user id."""
+    if not identifier:
+        return None, "Please provide a user ID or username."
+
+    cleaned = str(identifier).strip()
+    if not cleaned:
+        return None, "Please provide a user ID or username."
+
+    if cleaned.isdigit():
+        return cleaned, None
+
+    username = cleaned.lstrip("@").strip()
+    if not username:
+        return None, "Please provide a user ID or username."
+
+    record = XUser.query.filter_by(username=username).first()
+    if record:
+        return str(record.id), None
+
+    response = get_x_user_by_username(username)
+    if response is None:
+        return None, f"Unable to resolve @{username} right now."
+
+    payload = response if isinstance(response, dict) else None
+    if payload is None:
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = None
+
+    if payload and payload.get("data", {}).get("id"):
+        return str(payload["data"]["id"]), None
+
+    return None, f"Unable to resolve @{username}. Try again or use an ID."
+
+
 def print_x_key(payload: Mapping[str, Any], key: str) -> Any:
     """Print and return a specific key from an X API response payload."""
     value = payload.get(key)
@@ -289,7 +328,13 @@ def get_x_user_by_username(username: str) -> Any:
     headers = {"Authorization": f"Bearer {token}"}
 
     response = requests.get(url, headers=headers, params=params, timeout=10)
-    _log_api_request("GET", response.url, response.status_code, response.text)
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
     payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
     if not payload or "data" not in payload:
         print(response.text)
@@ -329,7 +374,13 @@ def get_x_user_by_id(user_id: str) -> Any:
     headers = {"Authorization": f"Bearer {token}"}
 
     response = requests.get(url, headers=headers, params=params, timeout=10)
-    _log_api_request("GET", response.url, response.status_code, response.text)
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
     payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
     if not payload or "data" not in payload:
         print(response.text)
@@ -365,6 +416,7 @@ def get_my_x_user() -> Any:
             "https://api.x.com/2/users/me",
             None,
             json.dumps(response),
+            None,
             commit=True,
         )
         print(json.dumps(response, indent=4))
@@ -373,9 +425,22 @@ def get_my_x_user() -> Any:
     payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
     if not payload or "data" not in payload:
         print(response.text)
-        _log_api_request("GET", response.url, response.status_code, response.text, commit=True)
+        _log_api_request(
+            "GET",
+            response.url,
+            response.status_code,
+            response.text,
+            dict(response.headers),
+            commit=True,
+        )
         return response
-    _log_api_request("GET", response.url, response.status_code, response.text)
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
 
     _upsert_x_user(payload["data"])
 
@@ -415,7 +480,13 @@ def get_x_users_by_usernames(usernames: list[str] | str) -> Any:
     headers = {"Authorization": f"Bearer {token}"}
 
     response = requests.get(url, headers=headers, params=params, timeout=10)
-    _log_api_request("GET", response.url, response.status_code, response.text)
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
     payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
     if not payload or "data" not in payload:
         print(response.text)
@@ -461,7 +532,13 @@ def get_x_users_by_ids(user_ids: list[str] | str) -> Any:
     headers = {"Authorization": f"Bearer {token}"}
 
     response = requests.get(url, headers=headers, params=params, timeout=10)
-    _log_api_request("GET", response.url, response.status_code, response.text)
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
     payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
     if not payload or "data" not in payload:
         print(response.text)
@@ -478,4 +555,211 @@ def get_x_users_by_ids(user_ids: list[str] | str) -> Any:
     db.session.commit()
 
     print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_users_search(query: str, max_results: int = 100, next_token: str | None = None) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        "https://api.x.com/2/users/search",
+        params={
+            "query": query,
+            "max_results": max_results,
+            "next_token": next_token,
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+            "expansions": ",".join(_filter_fields(EXPANSIONS)),
+            "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            "https://api.x.com/2/users/search",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    for user in payload.get("data", []) or []:
+        _upsert_x_user(user)
+
+    includes = payload.get("includes", {})
+    for post in includes.get("tweets", []) or []:
+        _upsert_x_post(post)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def _get_active_x_user_id() -> str | None:
+    token_info = get_current_user_token()
+    if not token_info:
+        return None
+    return token_info.get("x_user_id")
+
+
+def get_x_muted_users(max_results: int = 100, pagination_token: str | None = None) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "GET",
+            "https://api.x.com/2/users/<ME>/muting",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{x_user_id}/muting",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{x_user_id}/muting",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    for user in payload.get("data", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def mute_x_user(target_user_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/users/me/muting",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.post,
+        f"https://api.x.com/2/users/{x_user_id}/muting",
+        json={"target_user_id": str(target_user_id)},
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            f"https://api.x.com/2/users/{x_user_id}/muting",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def unmute_x_user(target_user_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "DELETE",
+            "https://api.x.com/2/users/me/muting",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.delete,
+        f"https://api.x.com/2/users/{x_user_id}/muting/{target_user_id}",
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "DELETE",
+            f"https://api.x.com/2/users/{x_user_id}/muting/{target_user_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
     return response

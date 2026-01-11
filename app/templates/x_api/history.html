@@ -17,6 +17,7 @@
                             <th scope="col">Method</th>
                             <th scope="col">Status</th>
                             <th scope="col">URL</th>
+                            <th scope="col">Details</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -35,6 +36,34 @@
                                 {% endif %}
                             </td>
                             <td class="text-break">{{ log.url }}</td>
+                            <td>
+                                <button
+                                    class="btn btn-sm btn-outline-dark"
+                                    type="button"
+                                    data-bs-toggle="collapse"
+                                    data-bs-target="#log-{{ log.id }}"
+                                    aria-expanded="false"
+                                    aria-controls="log-{{ log.id }}"
+                                >
+                                    View
+                                </button>
+                            </td>
+                        </tr>
+                        <tr class="collapse" id="log-{{ log.id }}">
+                            <td colspan="6">
+                                <div class="border rounded p-3 bg-light-subtle">
+                                    {% if log.response_headers %}
+                                        <div class="small text-muted">Response headers</div>
+                                        <pre class="mb-3">{{ log.response_headers | tojson(indent=2) }}</pre>
+                                    {% endif %}
+                                    {% if log.response_body %}
+                                        <div class="small text-muted">Response body</div>
+                                        <pre class="mb-0">{{ log.response_body }}</pre>
+                                    {% else %}
+                                        <div class="text-muted">No response body stored.</div>
+                                    {% endif %}
+                                </div>
+                            </td>
                         </tr>
                         {% endfor %}
                     </tbody>

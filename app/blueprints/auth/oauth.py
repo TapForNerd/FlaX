@@ -19,6 +19,8 @@ def build_authorize_url(redirect_uri, state, code_challenge):
         "tweet.read",
         "tweet.write",
         "users.read",
+        "mute.read",
+        "mute.write",
         "list.read",
         "list.write",
         "offline.access",

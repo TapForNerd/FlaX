@@ -33,6 +33,7 @@ class UserOAuthToken(db.Model):
     access_token = db.Column(db.Text, nullable=False)
     refresh_token = db.Column(db.Text)
     expires_at = db.Column(db.DateTime)
+    scope = db.Column(db.Text)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
     __table_args__ = (db.UniqueConstraint("owner_user_id", "x_user_id", name="uq_token_owner_x"),)
@@ -64,6 +65,7 @@ class ApiRequestLog(db.Model):
     url = db.Column(db.Text, nullable=False)
     status_code = db.Column(db.Integer)
     response_body = db.Column(db.Text)
+    response_headers = db.Column(JSON)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
 
