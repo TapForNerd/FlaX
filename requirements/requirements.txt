@@ -1,0 +1,733 @@
+/FlaX
+├── app/                          # Core application package
+│   ├── __init__.py               # Creates the Flask app, registers blueprints
+│   ├── config.py                 # Config classes (Development, Production, etc.)
+│   ├── extensions.py             # Shared extensions (e.g., login_manager if needed)
+│   │
+│   ├── blueprints/               # All feature modules live here
+│   │   ├── auth/                 # Example: login/logout (if you need user auth)
+│   │   │   ├── __init__.py
+│   │   │   ├── routes.py
+│   │   │   └── templates/auth/   # auth/login.html, register.html, etc.
+│   │   │
+│   │   ├── home/                 # Main landing page / dashboard
+│   │   │   ├── __init__.py
+│   │   │   └── routes.py
+│   │   │
+│   │   ├── tweets/               # Core X API: fetch, display, post tweets
+│   │   │   ├── __init__.py
+│   │   │   ├── routes.py
+│   │   │   └── templates/tweets/
+│   │   │
+│   │   ├── users/                # User profiles, followers, etc.
+│   │   │   ├── __init__.py
+│   │   │   └── routes.py
+│   │   │
+│   │   └── search/               # Search posts, advanced search
+│   │       ├── __init__.py
+│   │       └── routes.py
+│   │
+│   ├── models/                   # Shared DB models (if using SQLAlchemy)
+│   │   └── (e.g., User.py, CachedTweet.py)
+│   │
+│   ├── services/                 # Business logic, especially X API wrappers
+│   │   ├── __init__.py
+│   │   └── x_client.py           # Wrapper around Tweepy / requests to X API
+│   │
+│   ├── utils/                    # Helpers: auth, formatting, rate limit handling
+│   │
+│   ├── static/                   # Global static assets
+│   │   ├── css/
+│   │   ├── js/
+│   │   └── assets/
+│   │
+│   └── templates/                # Global templates
+│       ├── base.html
+│       ├── index.html
+│       └── includes/             # Partials like navbar, footer
+│
+├── instance/                     # Instance-specific data (auto-created, gitignored)
+├── migrations/                   # If using Flask-Migrate
+├── tests/                        # Unit/integration tests
+│   └── test_*.py
+│
+├── .env                          # Local environment variables
+├── .gitignore
+├── config.py                     # Optional: fallback config
+├── requirements.txt
+└── run.py                        # Entry point: creates and runs the app
+X Authentication Design (Flask)
+This document summarizes how X (Twitter) authentication is implemented in this app and provides a blueprint for other Flask developers to replicate the design.
+
+Goals
+Support OAuth 2.0 with PKCE for X.
+Store access/refresh tokens securely and refresh automatically.
+Allow linking multiple X accounts to one primary session.
+Provide a simple admin role gate.
+High-Level Flow
+User initiates OAuth from /auth/x-login (or /auth/x-connect to link).
+App generates PKCE code_verifier + code_challenge, stores them in session.
+User is redirected to X OAuth authorize URL.
+X redirects back to /callback (or /auth/callback) with code + state.
+App exchanges code for tokens, fetches X profile, stores user + tokens.
+Session is established with user_id and active_x_user_id.
+Key Components
+OAuth client: app/blueprints/auth/oauth.py
+Generates PKCE params.
+Builds auth URL with scopes.
+Exchanges code for tokens.
+Refreshes tokens.
+Fetches X user profile.
+Callback handler: app/blueprints/auth/oauth_flow.py
+Validates state.
+Exchanges code for tokens.
+Creates/updates User.
+Stores tokens (encrypted).
+Handles account linking.
+Token helpers: app/blueprints/auth/token_helpers.py
+Loads and decrypts access tokens.
+Refreshes on expiration or when X returns 401.
+Stores tokens in UserOAuthToken.
+Session + guardrails: app/blueprints/auth/decorators.py
+login_required uses session cookies and redirects to login.
+admin_required currently delegates to is_admin().
+Models: app/models.py
+User, UserOAuthToken, UserLinkedAccount.
+Scopes Used
+The OAuth client requests these scopes:
+
+tweet.read
+tweet.write
+users.read
+list.read
+list.write
+offline.access (refresh tokens)
+Roles / Authorization
+This app uses a simple admin boolean on User:
+
+User.is_admin is set in two ways:
+Local admin login via /auth/login with admin/admin.
+X login when username is in x_admin_usernames config (CSV).
+admin_required decorator currently calls is_admin(); note that is_admin() currently returns is_authenticated() and does not enforce User.is_admin.
+Session Keys
+Important session keys:
+
+user_id: primary logged-in user id.
+active_x_user_id: which X account to use for API calls.
+oauth_code_verifier, oauth_state, oauth_redirect_uri: PKCE + CSRF.
+linking_owner_user_id, linking_expected_user_id: account linking flow.
+Sessions are cookie-based and configured in config.py:
+
+Cookie name: afb_session
+SESSION_COOKIE_SAMESITE='Lax' for OAuth redirects.
+Secure cookies in production.
+Data Storage
+UserOAuthToken records are stored in DB and encrypted:
+
+access_token and refresh_token are encrypted with AES-256 using utils/encrypt_decrypt.py.
+expires_at is tracked and used for refresh.
+Endpoints (Auth)
+GET /auth/login: local login page.
+POST /auth/login: local admin login (admin/admin).
+GET /auth/x-login: start OAuth login.
+GET /auth/x-connect: link another X account.
+GET /auth/x-accounts/<id>/reauth: re-auth a linked account.
+GET /callback and GET /auth/callback: OAuth callback (shared handler).
+POST /auth/x-accounts/<id>/activate: set active X account.
+POST /auth/x-accounts/<id>/disconnect: unlink X account.
+POST /auth/x-accounts/<id>/refresh-token: refresh linked token.
+POST /auth/x-accounts/<id>/revoke-token: delete linked token.
+How X API Calls Use Tokens
+Most X routes are guarded by @login_required. Token usage:
+
+get_current_user_token() selects active_x_user_id or user_id.
+_call_x_api_with_refresh() tries the API call and refreshes if 401.
+Required Configuration
+Set environment variables (or config var equivalents):
+
+x_client_id
+x_client_secret
+x_app_name (used in User-Agent)
+version (used in User-Agent)
+x_admin_usernames (CSV of X usernames for admin)
+Example cURL Flows (No Real Tokens)
+1) Start OAuth (expect 302 to X)
+curl -i "http://localhost:5000/auth/x-login"
+2) OAuth Callback (simulated)
+curl -i "http://localhost:5000/callback?code=AUTH_CODE_FROM_X&state=OAUTH_STATE"
+3) Local Admin Login (sets session cookie)
+curl -i -c cookies.txt \
+  -X POST "http://localhost:5000/auth/login" \
+  -d "username=admin" \
+  -d "password=admin"
+4) Call a Protected X Route Using Session Cookie
+curl -i -b cookies.txt \
+  "http://localhost:5000/x_twitter/"
+5) Activate a Linked X Account (session-based)
+curl -i -b cookies.txt \
+  -X POST "http://localhost:5000/auth/x-accounts/123/activate"
+6) Refresh a Linked Account Token (session-based)
+curl -i -b cookies.txt \
+  -X POST "http://localhost:5000/auth/x-accounts/123/refresh-token"
+X API Endpoints Used by This App
+OAuth endpoints:
+
+GET https://x.com/i/oauth2/authorize (authorization redirect)
+POST https://api.x.com/2/oauth2/token (code exchange and refresh)
+User/profile endpoints:
+
+GET https://api.x.com/2/users/me?user.fields=... (profile after token exchange)
+GET https://api.x.com/2/users/by/username/:username
+GET https://api.x.com/2/users/by (batch by usernames)
+GET https://api.x.com/2/users (batch by ids)
+List endpoints:
+
+GET https://api.x.com/2/lists/:list_id
+GET https://api.x.com/2/lists/:list_id/tweets
+GET https://api.x.com/2/lists/:list_id/members
+GET https://api.x.com/2/lists/:list_id/followers
+POST https://api.x.com/2/lists (create)
+PUT https://api.x.com/2/lists/:list_id (update)
+DELETE https://api.x.com/2/lists/:list_id (delete)
+GET https://api.x.com/2/users/:user_id/followed_lists
+GET https://api.x.com/2/users/:user_id/owned_lists
+GET https://api.x.com/2/users/:user_id/list_memberships
+GET https://api.x.com/2/users/:user_id/pinned_lists
+POST https://api.x.com/2/users/:user_id/followed_lists (follow list)
+DELETE https://api.x.com/2/users/:user_id/followed_lists/:list_id (unfollow list)
+POST https://api.x.com/2/users/:user_id/pinned_lists (pin list)
+DELETE https://api.x.com/2/users/:user_id/pinned_lists/:list_id (unpin list)
+POST https://api.x.com/2/lists/:list_id/members (add member)
+DELETE https://api.x.com/2/lists/:list_id/members/:user_id (remove member)
+Tweet/news endpoints:
+
+GET https://api.x.com/2/tweets (batch tweet lookup)
+POST https://api.x.com/2/tweets (post tweet)
+GET https://api.x.com/2/news/search (X news search)
+Token usage notes:
+
+OAuth user tokens are pulled from UserOAuthToken and refreshed when needed.
+Some helpers use an app-level bearer token (x_bearer_token) for X news/tweet fetches.
+Implementation Notes for Other Flask Apps
+Use cookie-based sessions with SameSite=Lax to keep OAuth redirects working.
+Store PKCE verifier and state in session; validate state in callback.
+Use server-side token storage with encryption at rest.
+Set active_x_user_id to route token usage without changing login owner.
+Separate "login" and "link account" paths to support multiple linked X accounts.<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token }}">
+    <title>{% block title %}AF Bytes{% endblock %}</title>
+
+    <!-- Bootstrap CSS -->
+    <link href="/static/bootstrap/css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- Font Awesome -->
+    <link href="/static/fontawesome/css/all.min.css" rel="stylesheet">
+
+    <!-- DataTables CSS (if needed) -->
+    {% block extra_css_libs %}{% endblock %}
+
+    <!-- Custom AF Bytes CSS -->
+    <link href="/static/css/afbytes.css" rel="stylesheet">
+
+    <!-- Page-specific CSS -->
+    {% block page_css %}{% endblock %}
+</head>
+<body class="{% block body_class %}{% endblock %}">
+
+    <!-- Navigation -->
+    {% if show_navbar %}
+    <nav class="navbar navbar-expand-lg navbar-dark afb-navbar">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">
+                <i class="fas fa-vault"></i> AF Bytes
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.path == '/' %}active{% endif %}" href="/">
+                            <i class="fas fa-home"></i> Home
+                        </a>
+                    </li>
+
+                    <!-- Vault Dropdown -->
+                    <li class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle {% if request.path.startswith('/vault') %}active{% endif %}"
+                           href="#" id="vaultDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+                            <i class="fas fa-vault"></i> Vault
+                        </a>
+                        <ul class="dropdown-menu" aria-labelledby="vaultDropdown">
+                            <li><a class="dropdown-item" href="/vault">
+                                <i class="fas fa-key"></i> Dashboard
+                            </a></li>
+                            <li><a class="dropdown-item" href="/vault/create">
+                                <i class="fas fa-plus"></i> Create Secret
+                            </a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li><a class="dropdown-item" href="/vault/manage">
+                                <i class="fas fa-cog"></i> Manage
+                            </a></li>
+                            <li><a class="dropdown-item" href="/vault/export">
+                                <i class="fas fa-download"></i> Export
+                            </a></li>
+                        </ul>
+                    </li>
+
+                    <!-- System Dropdown -->
+                    <li class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle {% if request.path in ['/health', '/api', '/api-test'] %}active{% endif %}"
+                           href="#" id="systemDropdown" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+                            <i class="fas fa-tools"></i> System
+                        </a>
+                        <ul class="dropdown-menu" aria-labelledby="systemDropdown">
+                            <li><a class="dropdown-item" href="/health">
+                                <i class="fas fa-heartbeat"></i> Health Check
+                            </a></li>
+                            <li><a class="dropdown-item" href="/api">
+                                <i class="fas fa-plug"></i> API Endpoints
+                            </a></li>
+                            <li><a class="dropdown-item" href="/api-test">
+                                <i class="fas fa-flask"></i> API Test Page
+                            </a></li>
+                            <li><a class="dropdown-item" href="/admin">
+                                <i class="fas fa-database"></i> DB Tables
+                            </a></li>
+                        </ul>
+                    </li>
+                </ul>
+
+                <!-- User Dropdown -->
+                <div class="dropdown text-end">
+                  <a href="#" class="d-block link-body-emphasis text-decoration-none dropdown-toggle text-white" data-bs-toggle="dropdown" aria-expanded="false">
+                    {% if user and user.profile_image %}
+                        <img src="{{ user.profile_image }}" alt="Profile" class="rounded-circle" style="width: 32px; height: 32px;">
+                    {% else %}
+                        <i class="fab fa-x-twitter" style="font-size: 32px;"></i>
+                    {% endif %}
+                  </a>
+                  <ul class="dropdown-menu dropdown-menu-end dropdown-menu-dark text-small">
+                    <li><a class="dropdown-item" href="#"><i class="fas fa-plus me-2"></i>New project...</a></li>
+                    <li><a class="dropdown-item" href="#"><i class="fas fa-cog me-2"></i>Settings</a></li>
+                    {% if user %}
+                        <li><a class="dropdown-item" href="{{ url_for('auth.profile') }}"><i class="fas fa-user me-2"></i>Profile</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a class="dropdown-item" href="{{ url_for('auth.logout') }}"><i class="fas fa-sign-out-alt me-2"></i>Sign out</a></li>
+                    {% else %}
+                        <li><a class="dropdown-item" href="{{ url_for('auth.login') }}"><i class="fas fa-sign-in-alt me-2"></i>Sign in</a></li>
+                    {% endif %}
+                  </ul>
+                </div>
+            </div>
+        </div>
+    </nav>
+    {% endif %}
+
+    <!-- Flash Messages -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="container mt-3">
+            {% for category, message in messages %}
+            <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                {% if category == 'success' %}
+                    <i class="fas fa-check-circle"></i>
+                {% elif category == 'danger' or category == 'error' %}
+                    <i class="fas fa-exclamation-triangle"></i>
+                {% elif category == 'warning' %}
+                    <i class="fas fa-exclamation-circle"></i>
+                {% elif category == 'info' %}
+                    <i class="fas fa-info-circle"></i>
+                {% endif %}
+                {{ message }}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    {% endwith %}
+
+    <!-- Main Content -->
+    <main class="{% block main_class %}{% endblock %}">
+        {% block content %}{% endblock %}
+    </main>
+
+    <!-- Footer -->
+    {% if show_footer %}
+    <footer class="afb-footer mt-5">
+        <div class="container text-center py-4">
+            <p class="mb-1">
+                <i class="fas fa-vault"></i> AF Bytes - Secure Secrets Management
+            </p>
+            <p class="text-muted small mb-0">
+                <i class="fas fa-server"></i> Version 1.0.0 | Environment: Development
+            </p>
+        </div>
+    </footer>
+    {% endif %}
+
+    <!-- jQuery -->
+    <script src="/static/jquery/jquery-3.7.1.min.js"></script>
+
+    <!-- AppAjax - Standardized AJAX Handler -->
+    <script src="/static/js/app_ajax.js"></script>
+
+    <!-- CSRF Token Management -->
+    <script>
+    // Initialize CSRF token from meta tag
+    window.CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+
+    // Configure jQuery to automatically include CSRF token in all AJAX requests
+    $.ajaxSetup({
+        beforeSend: function(xhr, settings) {
+            // Only add CSRF token for non-GET requests
+            if (!/^(GET|HEAD|OPTIONS|TRACE)$/i.test(settings.type) && !this.crossDomain) {
+                xhr.setRequestHeader("X-CSRFToken", window.CSRF_TOKEN);
+            }
+        }
+    });
+
+    // Function to refresh CSRF token from server
+    function refreshCsrfToken() {
+        $.getJSON('/security/csrf-refresh', function(data) {
+            if (data.csrf_token) {
+                // Update global variable
+                window.CSRF_TOKEN = data.csrf_token;
+                // Update meta tag
+                document.querySelector('meta[name="csrf-token"]').setAttribute('content', data.csrf_token);
+                console.log('CSRF token refreshed successfully');
+            }
+        }).fail(function(xhr, status, error) {
+            console.error('Failed to refresh CSRF token:', error);
+        });
+    }
+
+    // Auto-refresh CSRF token every 10 minutes (600,000 milliseconds)
+    setInterval(refreshCsrfToken, 10 * 60 * 1000);
+
+    // Optional: Refresh token when user returns to the tab (prevents stale tokens)
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden) {
+            refreshCsrfToken();
+        }
+    });
+    </script>
+
+    <!-- Bootstrap JS -->
+    <script src="/static/bootstrap/js/bootstrap.bundle.min.js"></script>
+
+    <!-- Extra JS Libraries (DataTables, etc.) -->
+    {% block extra_js_libs %}{% endblock %}
+
+    <!-- Custom AF Bytes JS -->
+    <script src="/static/js/afbytes.js"></script>
+
+    <!-- Page-specific JS -->
+    {% block page_js %}{% endblock %}
+</body>
+</html>
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token }}">
+    <title>{% block title %} {{ app_name }} {% endblock %}</title>
+
+    <!-- Bootstrap CSS (Local) -->
+    <link href="{{ url_for('static', filename='bootstrap/css/bootstrap.min.css') }}" rel="stylesheet">
+
+    <!-- Font Awesome (Local) -->
+    <link href="{{ url_for('static', filename='fontawesome/css/all.min.css') }}" rel="stylesheet">
+
+    <!-- Custom AF Bytes CSS -->
+    <link href="{{ url_for('static', filename='css/afbytes.css') }}" rel="stylesheet">
+
+    <!-- Page-specific CSS -->
+    {% block extra_css %}{% endblock %}
+</head>
+<body class="sidebar-layout">
+
+    <!-- Sidebar -->
+    <div id="sidebar" class="d-flex flex-column flex-shrink-0 text-bg-dark">
+
+        <!-- Sidebar Header (Logo Area) -->
+        <a href="{{ url_for('main.index') }}" class="sidebar-header text-white text-decoration-none">
+            <i class="fas fa-cube pe-none me-2" style="font-size: 32px;"></i>
+            <span class="fs-4 sidebar-header-text">{% block sidebar_brand %} {{ app_name }} {% endblock %}</span>
+        </a>
+
+        <!-- Sidebar Navigation -->
+        <div class="sidebar-nav-container">
+            <ul class="nav nav-pills flex-column mb-auto">
+                {% block sidebar_nav %}
+                {# Dynamic navigation from blueprints #}
+                {% for nav_item in blueprint_navigation if nav_item and 'blueprint_name' in nav_item %}
+                    {% if not nav_item.hide_from_nav %}
+                        {% if nav_item.links %}
+                            {# Blueprint with sublinks - create collapsible section #}
+                            <li class="nav-item{% if nav_item.blueprint_name == current_blueprint %} active{% endif %}">
+                                {% if nav_item.href %}
+                                <a href="{{ nav_item.href }}"
+                                   class="nav-link text-white d-flex align-items-center"
+                                   aria-expanded="{% if nav_item.blueprint_name == current_blueprint %}true{% else %}false{% endif %}"
+                                   data-bs-placement="right"
+                                   title="{{ nav_item.tooltip }}">
+                                    <i class="fas {{ nav_item.icon }} pe-none me-2"></i>
+                                    <span class="link-text">{{ nav_item.name }}</span>
+                                    <i class="fas fa-chevron-down ms-auto"></i>
+                                </a>
+                                {% else %}
+                                <a href="#{{ nav_item.name|lower|replace(' ', '-') }}-collapse"
+                                   class="nav-link text-white d-flex align-items-center"
+                                   data-bs-toggle="collapse"
+                                   aria-expanded="{% if nav_item.blueprint_name == current_blueprint %}true{% else %}false{% endif %}"
+                                   data-bs-placement="right"
+                                   title="{{ nav_item.tooltip }}">
+                                    <i class="fas {{ nav_item.icon }} pe-none me-2"></i>
+                                    <span class="link-text">{{ nav_item.name }}</span>
+                                    <i class="fas fa-chevron-down ms-auto"></i>
+                                </a>
+                                {% endif %}
+                                <div class="collapse{% if nav_item.blueprint_name == current_blueprint %} show{% endif %}" id="{{ nav_item.name|lower|replace(' ', '-') }}-collapse">
+                                    <ul class="nav flex-column ms-3">
+                                        {% for link in nav_item.links %}
+                                        <li class="nav-item">
+                                            {% if link.href %}
+                                            <a href="{{ link.href }}"
+                                               class="nav-link text-white-50"
+                                               data-bs-toggle="tooltip"
+                                               data-bs-placement="right"
+                                               title="{{ link.tooltip }}">
+                                                <i class="fas {{ link.icon }} pe-none me-2"></i>
+                                                <span class="link-text">{{ link.name }}</span>
+                                            </a>
+                                            {% endif %}
+                                        </li>
+                                        {% endfor %}
+                                    </ul>
+                                </div>
+                            </li>
+                        {% else %}
+                            {# Blueprint without sublinks - direct link to index if available #}
+                            {% if nav_item.href %}
+                            <li class="nav-item">
+                                <a href="{{ nav_item.href }}"
+                                   class="nav-link text-white"
+                                   data-bs-toggle="tooltip"
+                                   data-bs-placement="right"
+                                   title="{{ nav_item.tooltip }}">
+                                    <i class="fas {{ nav_item.icon }} pe-none me-2"></i>
+                                    <span class="link-text">{{ nav_item.name }}</span>
+                                </a>
+                            </li>
+                            {% endif %}
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+          {% endblock %}
+            </ul>
+        </div>
+
+        <!-- Sidebar Footer (User Dropdown) -->
+        <div class="sidebar-footer">
+            <div class="dropdown">
+                <a href="#" class="d-flex align-items-center text-white text-decoration-none dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
+                    {% if user and user.profile_image %}
+                        <img src="{{ user.profile_image }}" alt="Profile" class="rounded-circle me-2" style="width: 32px; height: 32px;">
+                    {% else %}
+                        <i class="fab fa-x-twitter rounded-circle me-2" style="font-size: 32px;"></i>
+                    {% endif %}
+                    <strong>
+                        {% if user %}
+                            {% if user.type == 'admin' %}
+                                Admin
+                            {% else %}
+                                {{ user.name or user.username }}
+                            {% endif %}
+                        {% else %}
+                            Guest
+                        {% endif %}
+                    </strong>
+                </a>
+                <ul class="dropdown-menu dropdown-menu-dark text-small shadow">
+                    <li><a class="dropdown-item" href="#"><i class="fas fa-plus me-2"></i>New project...</a></li>
+                    <li><a class="dropdown-item" href="#"><i class="fas fa-cog me-2"></i>Settings</a></li>
+                    {% if user %}
+                        <li><a class="dropdown-item" href="{{ url_for('auth.profile') }}"><i class="fas fa-user me-2"></i>Profile</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a class="dropdown-item" href="{{ url_for('auth.logout') }}"><i class="fas fa-sign-out-alt me-2"></i>Sign out</a></li>
+                    {% else %}
+                        <li><a class="dropdown-item" href="{{ url_for('auth.login') }}"><i class="fas fa-sign-in-alt me-2"></i>Sign in</a></li>
+                    {% endif %}
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Wrapper (Right Side) -->
+    <div id="main-wrapper" class="bg-body-tertiary">
+
+        <!-- Top Navbar -->
+        <header id="top-navbar" class="p-3 mb-3 text-bg-dark">
+            <div class="container-fluid">
+              <div class="d-flex flex-wrap align-items-center justify-content-center justify-content-lg-start w-100">
+
+                <!-- Hamburger Toggle -->
+                <a href="#" id="toggleSidebar" class="d-flex align-items-center mb-2 mb-lg-0 link-body-emphasis text-decoration-none text-white me-3">
+                  <i class="fas fa-bars" style="font-size: 24px;"></i>
+                </a>
+
+                <!-- Top Navigation Links -->
+                <ul class="nav col-12 col-lg-auto me-lg-auto mb-2 justify-content-center mb-md-0">
+                  {% block top_nav %}
+                  {# Dynamic top navigation from blueprints: show blueprint names that have index routes #}
+                  {% for nav_item in blueprint_navigation %}
+                    {% if nav_item and not nav_item.hide_from_nav %}
+                        {% if nav_item.href %}
+                        <li>
+                          <a href="{{ nav_item.href }}"
+                             class="nav-link px-2 text-white">
+                            {{ nav_item.name }}
+                          </a>
+                        </li>
+                        {% endif %}
+                    {% endif %}
+                  {% endfor %}
+                  {% endblock %}
+                </ul>
+
+                <!-- Search Bar -->
+                <form class="col-12 col-lg-auto mb-3 mb-lg-0 me-lg-3" role="search">
+                  <input type="search" class="form-control form-control-dark text-bg-dark" placeholder="Search..." aria-label="Search">
+                </form>
+
+                <!-- User Dropdown (Top Right) -->
+                <div class="dropdown text-end">
+                  <a href="#" class="d-block link-body-emphasis text-decoration-none dropdown-toggle text-white" data-bs-toggle="dropdown" aria-expanded="false">
+                    {% if user and user.profile_image %}
+                        <img src="{{ user.profile_image }}" alt="Profile" class="rounded-circle" style="width: 32px; height: 32px;">
+                    {% else %}
+                        <i class="fab fa-x-twitter" style="font-size: 32px;"></i>
+                    {% endif %}
+                  </a>
+                  <ul class="dropdown-menu dropdown-menu-end dropdown-menu-dark text-small">
+                    <li><a class="dropdown-item" href="#"><i class="fas fa-plus me-2"></i>New project...</a></li>
+                    <li><a class="dropdown-item" href="#"><i class="fas fa-cog me-2"></i>Settings</a></li>
+                    {% if user %}
+                        <li><a class="dropdown-item" href="{{ url_for('auth.profile') }}"><i class="fas fa-user me-2"></i>Profile</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li><a class="dropdown-item" href="{{ url_for('auth.logout') }}"><i class="fas fa-sign-out-alt me-2"></i>Sign out</a></li>
+                    {% else %}
+                        <li><a class="dropdown-item" href="{{ url_for('auth.login') }}"><i class="fas fa-sign-in-alt me-2"></i>Sign in</a></li>
+                    {% endif %}
+                  </ul>
+                </div>
+              </div>
+            </div>
+        </header>
+
+        <!-- Flash Messages -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+            <div class="container-fluid">
+                {% for category, message in messages %}
+                <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+                    {% if category == 'success' %}
+                        <i class="fas fa-check-circle"></i>
+                    {% elif category == 'danger' or category == 'error' %}
+                        <i class="fas fa-exclamation-triangle"></i>
+                    {% elif category == 'warning' %}
+                        <i class="fas fa-exclamation-circle"></i>
+                    {% elif category == 'info' %}
+                        <i class="fas fa-info-circle"></i>
+                    {% endif %}
+                    {{ message }}
+                    <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+        {% endwith %}
+
+        <!-- Main Content -->
+        <main class="container-fluid text-white {% block main_class %}{% endblock %}">
+            {% block content %}{% endblock %}
+        </main>
+
+    </div>
+
+    <!-- jQuery -->
+    <script src="{{ url_for('static', filename='jquery/jquery-3.7.1.min.js') }}"></script>
+
+    <!-- AppAjax - Standardized AJAX Handler -->
+    <script src="{{ url_for('static', filename='js/app_ajax.js') }}"></script>
+
+    <!-- CSRF Token Management -->
+    <script>
+    // Initialize CSRF token from meta tag
+    window.CSRF_TOKEN = document.querySelector('meta[name="csrf-token"]').getAttribute('content');
+
+    // Configure jQuery to automatically include CSRF token in all AJAX requests
+    $.ajaxSetup({
+        beforeSend: function(xhr, settings) {
+            // Only add CSRF token for non-GET requests
+            if (!/^(GET|HEAD|OPTIONS|TRACE)$/i.test(settings.type) && !this.crossDomain) {
+                xhr.setRequestHeader("X-CSRFToken", window.CSRF_TOKEN);
+            }
+        }
+    });
+
+    // Function to refresh CSRF token from server
+    function refreshCsrfToken() {
+        $.getJSON('/security/csrf-refresh', function(data) {
+            if (data.csrf_token) {
+                // Update global variable
+                window.CSRF_TOKEN = data.csrf_token;
+                // Update meta tag
+                document.querySelector('meta[name="csrf-token"]').setAttribute('content', data.csrf_token);
+                console.log('CSRF token refreshed successfully');
+            }
+        }).fail(function(xhr, status, error) {
+            console.error('Failed to refresh CSRF token:', error);
+        });
+    }
+
+    // Auto-refresh CSRF token every 10 minutes (600,000 milliseconds)
+    setInterval(refreshCsrfToken, 10 * 60 * 1000);
+
+    // Optional: Refresh token when user returns to the tab (prevents stale tokens)
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden) {
+            refreshCsrfToken();
+        }
+    });
+    </script>
+
+    <!-- Bootstrap JS (Local) -->
+    <script src="{{ url_for('static', filename='bootstrap/js/bootstrap.bundle.min.js') }}"></script>
+
+    <!-- Custom AF Bytes JS -->
+    <script src="{{ url_for('static', filename='js/afbytes.js') }}"></script>
+
+    <!-- Page-specific JS -->
+    {% block extra_js %}{% endblock %}
+</body>
+</html>
+{% extends "base_sidebar.html" %}
+
+{% block title %}AF Bytes - Home{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+
+</div>
+{% endblock %}
+
+{% block extra_css %}
+
+{% endblock %}

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}Admin Login{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-6 col-lg-4">
+        <div class="card shadow-sm border-0">
+            <div class="card-body">
+                <h3 class="card-title mb-3">Admin Login</h3>
+                <form method="post">
+                    <div class="mb-3">
+                        <label class="form-label" for="username">Username</label>
+                        <input class="form-control" id="username" name="username" required>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="password">Password</label>
+                        <input class="form-control" id="password" name="password" type="password" required>
+                    </div>
+                    <button class="btn btn-dark w-100" type="submit">Sign in</button>
+                </form>
+                <div class="text-center mt-3">
+                    <a href="/auth/x-login">Use X login instead</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
