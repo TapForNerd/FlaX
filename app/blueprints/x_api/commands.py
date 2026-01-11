@@ -62,3 +62,4 @@ def search_users_cmd(query, max_results, next_token):
     """Search X users by query."""
     click.echo(f"Searching X users for: {query}")
     get_x_users_search(query, max_results=max_results, next_token=next_token)
+

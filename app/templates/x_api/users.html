@@ -262,6 +262,79 @@
                 </div>
               </div>
             </div>
+
+            {# Muted users #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hMutes">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cMutes" aria-expanded="false" aria-controls="cMutes">
+                  Mute management
+                </button>
+              </h2>
+              <div id="cMutes" class="accordion-collapse collapse" aria-labelledby="hMutes" data-bs-parent="#lookupAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">Target user ID or username</label>
+                    <div class="input-group mb-3">
+                      <input
+                        type="text"
+                        name="mute_target_id"
+                        value="{{ mute_target_id or '' }}"
+                        class="form-control"
+                        placeholder="@username or 2244994945"
+                      >
+                      <button class="btn btn-outline-dark" type="submit" name="mute_action" value="mute">Mute</button>
+                      <button class="btn btn-outline-dark" type="submit" name="mute_action" value="unmute">Unmute</button>
+                    </div>
+                    <div class="mb-3">
+                      <label class="form-label small x-muted mb-1">Or pick an existing user</label>
+                      <select
+                        class="form-select"
+                        name="mute_target_select"
+                        id="muteTargetSelect"
+                      >
+                        <option value="">Select a user from the database</option>
+                        {% for user in existing_users %}
+                          <option value="{{ user.id }}" {% if mute_target_select == (user.id | string) %}selected{% endif %}>
+                            @{{ user.username }}{% if user.name %} · {{ user.name }}{% endif %} ({{ user.id }})
+                          </option>
+                        {% endfor %}
+                      </select>
+                      <div class="form-text">Selecting a user fills the target field automatically.</div>
+                    </div>
+
+                    <div class="row g-2">
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Max results</label>
+                        <input
+                          type="number"
+                          name="mute_max_results"
+                          min="1"
+                          max="1000"
+                          class="form-control"
+                          value="{{ mute_max_results or '' }}"
+                          placeholder="100"
+                        >
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Pagination token (optional)</label>
+                        <input
+                          type="text"
+                          name="mute_pagination_token"
+                          class="form-control"
+                          value="{{ mute_pagination_token or '' }}"
+                          placeholder="pagination_token"
+                        >
+                      </div>
+                    </div>
+                    <div class="d-flex align-items-center justify-content-between mt-2">
+                      <div class="form-text">Requires OAuth user token.</div>
+                      <button class="btn btn-outline-dark" type="submit" name="mute_action" value="list">Get muted users</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+
           </div>
 
 
@@ -289,6 +362,10 @@
       </div>
     </div>
   </div>
+
+  {% if token_scope %}
+    <div class="form-text mt-2">Token scopes: {{ token_scope }}</div>
+  {% endif %}
 
       {% if curl_preview %}
         <div class="row g-2 mt-3">
@@ -348,17 +425,41 @@
     {# RIGHT: Results #}
     <div class="col-lg-7">
       {% if result %}
-        {% if result.data is mapping %}
-          {% set users = [result.data] %}
-        {% elif result.data is sequence %}
-          {% set users = result.data %}
-        {% elif result.includes and result.includes.users is defined %}
-          {% set users = result.includes.users %}
-        {% else %}
+        {% if result.data is mapping and (result.data.muting is defined or result.data.muted is defined) %}
+          {% set action_result = result.data %}
           {% set users = [] %}
+        {% else %}
+          {% set action_result = None %}
+          {% if result.data is mapping %}
+            {% set users = [result.data] %}
+          {% elif result.data is sequence %}
+            {% set users = result.data %}
+          {% elif result.includes and result.includes.users is defined %}
+            {% set users = result.includes.users %}
+          {% else %}
+            {% set users = [] %}
+          {% endif %}
         {% endif %}
 
         <div class="row g-4">
+          {% if action_result %}
+            <div class="col-12">
+              <div class="card x-card shadow-sm">
+                <div class="card-body text-center">
+                  <div class="x-muted small mb-1">Action result</div>
+                  <div class="fw-semibold">
+                    {% if action_result.muting is defined %}
+                      Muting: {{ "true" if action_result.muting else "false" }}
+                    {% elif action_result.muted is defined %}
+                      Muted: {{ "true" if action_result.muted else "false" }}
+                    {% else %}
+                      Completed.
+                    {% endif %}
+                  </div>
+                </div>
+              </div>
+            </div>
+          {% endif %}
           {% if users|length == 0 %}
             <div class="col-12">
               <div class="card x-card shadow-sm">
@@ -495,5 +596,14 @@
   document.querySelectorAll('.toast').forEach((toastEl) => {
     new bootstrap.Toast(toastEl, { delay: 3500 }).show();
   });
+  const muteSelect = document.getElementById('muteTargetSelect');
+  const muteInput = document.querySelector('input[name="mute_target_id"]');
+  if (muteSelect && muteInput) {
+    muteSelect.addEventListener('change', () => {
+      if (muteSelect.value) {
+        muteInput.value = muteSelect.value;
+      }
+    });
+  }
 </script>
 {% endblock %}
