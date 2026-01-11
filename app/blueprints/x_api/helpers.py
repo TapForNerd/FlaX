@@ -479,3 +479,48 @@ def get_x_users_by_ids(user_ids: list[str] | str) -> Any:
 
     print(json.dumps(payload, indent=4))
     return response
+
+
+def get_x_users_search(query: str, max_results: int = 100, next_token: str | None = None) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        "https://api.x.com/2/users/search",
+        params={
+            "query": query,
+            "max_results": max_results,
+            "next_token": next_token,
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+            "expansions": ",".join(_filter_fields(EXPANSIONS)),
+            "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            "https://api.x.com/2/users/search",
+            None,
+            json.dumps(response),
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request("GET", response.url, response.status_code, response.text)
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    for user in payload.get("data", []) or []:
+        _upsert_x_user(user)
+
+    includes = payload.get("includes", {})
+    for post in includes.get("tweets", []) or []:
+        _upsert_x_post(post)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response

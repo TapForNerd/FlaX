@@ -7,6 +7,7 @@ from app.blueprints.x_api.helpers import (
     get_x_user_by_username,
     get_x_users_by_ids,
     get_x_users_by_usernames,
+    get_x_users_search,
 )
 
 # Create a command group for X API tasks
@@ -51,3 +52,13 @@ def get_my_user_cmd():
     """Fetch and print the authenticated X user."""
     click.echo("Fetching authenticated X user...")
     get_my_x_user()
+
+
+@x_api_cli.command('search-users')
+@click.argument('query')
+@click.option('--max-results', default=100, type=int)
+@click.option('--next-token', default=None)
+def search_users_cmd(query, max_results, next_token):
+    """Search X users by query."""
+    click.echo(f"Searching X users for: {query}")
+    get_x_users_search(query, max_results=max_results, next_token=next_token)

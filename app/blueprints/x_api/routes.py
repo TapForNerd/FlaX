@@ -18,6 +18,7 @@ from app.blueprints.x_api.helpers import (
     get_x_user_by_id,
     get_x_user_by_username,
     get_x_users_by_ids,
+    get_x_users_search,
     get_x_users_by_usernames,
 )
 from app.models import ApiRequestLog
@@ -62,6 +63,9 @@ def users():
     usernames = ""
     user_id = ""
     user_ids = ""
+    search_query = ""
+    search_max_results = ""
+    search_next_token = ""
     result = None
     error = session.get("x_user_lookup_error")
     curl_preview = session.get("x_user_lookup_curl")
@@ -78,6 +82,9 @@ def users():
         usernames = request.form.get("usernames", "").strip()
         user_id = request.form.get("user_id", "").strip()
         user_ids = request.form.get("user_ids", "").strip()
+        search_query = request.form.get("search_query", "").strip()
+        search_max_results = request.form.get("search_max_results", "").strip()
+        search_next_token = request.form.get("search_next_token", "").strip()
         curl_preview = None
         params = {
             "user.fields": ",".join(_filter_fields(USER_FIELDS)),
@@ -112,6 +119,19 @@ def users():
             response = get_x_users_by_ids(cleaned)
             params["ids"] = "ID1,ID2"
             curl_preview = build_curl("https://api.x.com/2/users", params)
+        elif search_query:
+            try:
+                max_results = int(search_max_results) if search_max_results else 100
+            except ValueError:
+                max_results = 100
+            max_results = min(max(max_results, 1), 1000)
+            flash("Search started.", "info")
+            response = get_x_users_search(search_query, max_results=max_results, next_token=search_next_token or None)
+            params["query"] = "<QUERY>"
+            params["max_results"] = max_results
+            if search_next_token:
+                params["next_token"] = "<NEXT_TOKEN>"
+            curl_preview = build_curl("https://api.x.com/2/users/search", params)
         else:
             response = None
             error = "Please enter a username or id (single or comma-separated)."
