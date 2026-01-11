@@ -34,5 +34,11 @@ def create_app():
     app.register_blueprint(items_bp)
     app.register_blueprint(x_api_bp)
     app.add_url_rule("/callback", endpoint="callback_root", view_func=app.view_functions["auth.callback"])
+    app.add_url_rule("/x/callback", endpoint="callback_x", view_func=app.view_functions["auth.callback"])
+    app.add_url_rule(
+        "/x/service-account-callback",
+        endpoint="callback_x_service",
+        view_func=app.view_functions["auth.callback"],
+    )
 
     return app

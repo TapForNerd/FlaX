@@ -7,5 +7,5 @@ if __name__ == "__main__":
     try:
         port = int(Config.PORT)
     except (TypeError, ValueError):
-        port = 5000
+        port = 5015
     app.run(debug=True, port=port)
