@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -75,6 +76,25 @@ EXPANSIONS = [
     "affiliation.user_id",
     "most_recent_tweet_id",
     "pinned_tweet_id",
+]
+
+LIST_FIELDS = [
+    "created_at",
+    "description",
+    "follower_count",
+    "id",
+    "member_count",
+    "name",
+    "owner_id",
+    "private",
+]
+
+LIST_EXPANSIONS = [
+    "owner_id",
+]
+
+TWEET_EXPANSIONS = [
+    "author_id",
 ]
 
 
@@ -303,6 +323,25 @@ def resolve_x_user_id(identifier: str | None) -> tuple[str | None, str | None]:
         return str(payload["data"]["id"]), None
 
     return None, f"Unable to resolve @{username}. Try again or use an ID."
+
+
+def resolve_x_post_id(identifier: str | None) -> tuple[str | None, str | None]:
+    """Resolve a post identifier into a numeric post id."""
+    if not identifier:
+        return None, "Please provide a post ID."
+
+    cleaned = str(identifier).strip()
+    if not cleaned:
+        return None, "Please provide a post ID."
+
+    if cleaned.isdigit():
+        return cleaned, None
+
+    match = re.search(r"/status/(\d+)", cleaned) or re.search(r"/posts/(\d+)", cleaned)
+    if match:
+        return match.group(1), None
+
+    return None, "Please provide a post ID or a post URL."
 
 
 def print_x_key(payload: Mapping[str, Any], key: str) -> Any:
@@ -745,6 +784,945 @@ def unmute_x_user(target_user_id: str) -> Any:
         _log_api_request(
             "DELETE",
             f"https://api.x.com/2/users/{x_user_id}/muting/{target_user_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def get_x_liked_posts(user_id: str, max_results: int = 100, pagination_token: str | None = None) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/liked_tweets",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/liked_tweets",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    for post in payload.get("data", []) or []:
+        _upsert_x_post(post)
+
+    includes = payload.get("includes", {})
+    for post in includes.get("tweets", []) or []:
+        _upsert_x_post(post)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_liking_users(
+    post_id: str,
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/tweets/{post_id}/liking_users",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/tweets/{post_id}/liking_users",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    for user in payload.get("data", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def like_x_post(post_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/users/me/likes",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.post,
+        f"https://api.x.com/2/users/{x_user_id}/likes",
+        json={"tweet_id": str(post_id)},
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            f"https://api.x.com/2/users/{x_user_id}/likes",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def unlike_x_post(post_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "DELETE",
+            "https://api.x.com/2/users/me/likes",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.delete,
+        f"https://api.x.com/2/users/{x_user_id}/likes/{post_id}",
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "DELETE",
+            f"https://api.x.com/2/users/{x_user_id}/likes/{post_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def get_x_list_by_id(list_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/lists/{list_id}",
+        params={
+            "list.fields": ",".join(_filter_fields(LIST_FIELDS)),
+            "expansions": ",".join(_filter_fields(LIST_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/lists/{list_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    includes = payload.get("includes", {})
+    for user in includes.get("users", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_user_followed_lists(
+    user_id: str,
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/followed_lists",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "list.fields": ",".join(_filter_fields(LIST_FIELDS)),
+            "expansions": ",".join(_filter_fields(LIST_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/followed_lists",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    includes = payload.get("includes", {})
+    for user in includes.get("users", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_user_owned_lists(
+    user_id: str,
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/owned_lists",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "list.fields": ",".join(_filter_fields(LIST_FIELDS)),
+            "expansions": ",".join(_filter_fields(LIST_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/owned_lists",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    includes = payload.get("includes", {})
+    for user in includes.get("users", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_user_list_memberships(
+    user_id: str,
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/list_memberships",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "list.fields": ",".join(_filter_fields(LIST_FIELDS)),
+            "expansions": ",".join(_filter_fields(LIST_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/list_memberships",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    includes = payload.get("includes", {})
+    for user in includes.get("users", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_list_tweets(
+    list_id: str,
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/lists/{list_id}/tweets",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+            "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/lists/{list_id}/tweets",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    for post in payload.get("data", []) or []:
+        _upsert_x_post(post)
+
+    includes = payload.get("includes", {})
+    for post in includes.get("tweets", []) or []:
+        _upsert_x_post(post)
+    for user in includes.get("users", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_list_followers(
+    list_id: str,
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/lists/{list_id}/followers",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/lists/{list_id}/followers",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    for user in payload.get("data", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_list_members(
+    list_id: str,
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/lists/{list_id}/members",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/lists/{list_id}/members",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    for user in payload.get("data", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def create_x_list(name: str, description: str | None = None, private: bool = False) -> Any:
+    payload = {"name": name}
+    if description:
+        payload["description"] = description
+    payload["private"] = bool(private)
+
+    response = call_x_api_with_refresh(
+        requests.post,
+        "https://api.x.com/2/lists",
+        json=payload,
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/lists",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def update_x_list(
+    list_id: str,
+    name: str | None = None,
+    description: str | None = None,
+    private: bool | None = None,
+) -> Any:
+    payload = {}
+    if name:
+        payload["name"] = name
+    if description is not None:
+        payload["description"] = description
+    if private is not None:
+        payload["private"] = bool(private)
+
+    response = call_x_api_with_refresh(
+        requests.put,
+        f"https://api.x.com/2/lists/{list_id}",
+        json=payload,
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "PUT",
+            f"https://api.x.com/2/lists/{list_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "PUT",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def delete_x_list(list_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.delete,
+        f"https://api.x.com/2/lists/{list_id}",
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "DELETE",
+            f"https://api.x.com/2/lists/{list_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def follow_x_list(list_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/users/me/followed_lists",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.post,
+        f"https://api.x.com/2/users/{x_user_id}/followed_lists",
+        json={"list_id": str(list_id)},
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            f"https://api.x.com/2/users/{x_user_id}/followed_lists",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def unfollow_x_list(list_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "DELETE",
+            "https://api.x.com/2/users/me/followed_lists",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.delete,
+        f"https://api.x.com/2/users/{x_user_id}/followed_lists/{list_id}",
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "DELETE",
+            f"https://api.x.com/2/users/{x_user_id}/followed_lists/{list_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def add_x_list_member(list_id: str, user_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.post,
+        f"https://api.x.com/2/lists/{list_id}/members",
+        json={"user_id": str(user_id)},
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            f"https://api.x.com/2/lists/{list_id}/members",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def remove_x_list_member(list_id: str, user_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.delete,
+        f"https://api.x.com/2/lists/{list_id}/members/{user_id}",
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "DELETE",
+            f"https://api.x.com/2/lists/{list_id}/members/{user_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def get_x_user_pinned_lists(user_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/pinned_lists",
+        params={
+            "list.fields": ",".join(_filter_fields(LIST_FIELDS)),
+            "expansions": ",".join(_filter_fields(LIST_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/pinned_lists",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    includes = payload.get("includes", {})
+    for user in includes.get("users", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def pin_x_list(list_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/users/me/pinned_lists",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.post,
+        f"https://api.x.com/2/users/{x_user_id}/pinned_lists",
+        json={"list_id": str(list_id)},
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            f"https://api.x.com/2/users/{x_user_id}/pinned_lists",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def unpin_x_list(list_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "DELETE",
+            "https://api.x.com/2/users/me/pinned_lists",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.delete,
+        f"https://api.x.com/2/users/{x_user_id}/pinned_lists/{list_id}",
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "DELETE",
+            f"https://api.x.com/2/users/{x_user_id}/pinned_lists/{list_id}",
             None,
             json.dumps(response),
             None,

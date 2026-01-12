@@ -1,0 +1,571 @@
+{% extends "base.html" %}
+
+{% block title %}X Likes{% endblock %}
+
+{% block content %}
+
+<style>
+  .x-card {
+    border: 0;
+    border-radius: 1rem;
+    position: relative;
+    overflow: hidden;
+  }
+  .x-muted { color: rgba(0,0,0,.60); }
+  .x-pill {
+    border: 1px solid rgba(0,0,0,.10);
+    border-radius: 999px;
+    padding: .35rem .65rem;
+    font-size: .85rem;
+    background: #fff;
+  }
+  .x-kpi {
+    border: 1px solid rgba(0,0,0,.08);
+    border-radius: .9rem;
+    padding: .85rem .9rem;
+    background: #fff;
+  }
+  .x-kpi .label { font-size: .8rem; color: rgba(0,0,0,.55); }
+  .x-kpi .value { font-size: 1.15rem; font-weight: 700; line-height: 1.1; }
+
+  pre.x-pre {
+    max-height: 340px;
+    overflow: auto;
+    background: #0b1020;
+    color: #d7e2ff;
+    border-radius: .75rem;
+    padding: 1rem;
+    font-size: .85rem;
+    margin: 0;
+  }
+</style>
+
+<div class="container-fluid py-4">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 1080;">
+        {% for category, message in messages %}
+          <div class="toast text-bg-{{ category }} border-0 mb-2" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="d-flex">
+              <div class="toast-body">{{ message }}</div>
+              <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <div class="d-flex align-items-end justify-content-between mb-3">
+    <div>
+      <h3 class="mb-1">X Likes</h3>
+      <div class="x-muted">Look up likes and manage your own likes.</div>
+    </div>
+  </div>
+
+  <div class="row g-4">
+    {# LEFT: Controls #}
+    <div class="col-lg-5">
+      <div class="card x-card shadow-sm">
+        <div class="card-body p-3 p-md-4">
+          <div class="d-flex align-items-center justify-content-between mb-3">
+            <div>
+              <h5 class="mb-1">Likes toolbox</h5>
+              <div class="x-muted small">Pick an action below.</div>
+            </div>
+            <span class="badge text-bg-light border">X API</span>
+          </div>
+
+          {% if known_limit %}
+            <div class="alert alert-warning d-flex align-items-start gap-2 mb-3">
+              <div class="fw-semibold">Known limitation:</div>
+              <div class="flex-grow-1">{{ known_limit }}</div>
+            </div>
+          {% endif %}
+          {% if error %}
+            <div class="alert alert-warning d-flex align-items-start gap-2 mb-3">
+              <div class="fw-semibold">Heads up:</div>
+              <div class="flex-grow-1">{{ error }}</div>
+            </div>
+          {% endif %}
+
+          <div class="accordion" id="likesAccordion">
+            {# Liked posts by user #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hLikedPosts">
+                <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#cLikedPosts" aria-expanded="true" aria-controls="cLikedPosts">
+                  Posts liked by a user
+                </button>
+              </h2>
+              <div id="cLikedPosts" class="accordion-collapse collapse show" aria-labelledby="hLikedPosts" data-bs-parent="#likesAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">User ID or username</label>
+                    <input
+                      type="text"
+                      name="liked_user_identifier"
+                      value="{{ liked_user_identifier or '' }}"
+                      class="form-control"
+                      placeholder="@tapfornerd or 2244994945"
+                    >
+                    <div class="form-text">Leave blank to use your active X account.</div>
+                    <div class="mt-2">
+                      <label class="form-label small x-muted mb-1">Or pick an existing user</label>
+                      <select class="form-select" name="liked_user_select" id="likedUserSelect">
+                        <option value="">Select a user from the database</option>
+                        {% for user in existing_users %}
+                          <option value="{{ user.id }}" {% if liked_user_select == (user.id | string) %}selected{% endif %}>
+                            @{{ user.username }}{% if user.name %} · {{ user.name }}{% endif %} ({{ user.id }})
+                          </option>
+                        {% endfor %}
+                      </select>
+                    </div>
+
+                    <div class="row g-2 mt-2">
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Max results</label>
+                        <input
+                          type="number"
+                          name="liked_max_results"
+                          min="5"
+                          max="100"
+                          class="form-control"
+                          value="{{ liked_max_results or '' }}"
+                          placeholder="100"
+                        >
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Pagination token (optional)</label>
+                        <input
+                          type="text"
+                          name="liked_pagination_token"
+                          class="form-control"
+                          value="{{ liked_pagination_token or '' }}"
+                          placeholder="pagination_token"
+                        >
+                      </div>
+                    </div>
+                    <div class="d-flex align-items-center justify-content-between mt-2">
+                      <div class="form-text">Requires OAuth user token.</div>
+                      <button class="btn btn-outline-dark" type="submit" name="likes_action" value="liked_posts">Get liked posts</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# Liking users by post #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hLikingUsers">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cLikingUsers" aria-expanded="false" aria-controls="cLikingUsers">
+                  Users who liked a post
+                </button>
+              </h2>
+              <div id="cLikingUsers" class="accordion-collapse collapse" aria-labelledby="hLikingUsers" data-bs-parent="#likesAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">Post ID or URL</label>
+                    <input
+                      type="text"
+                      name="liking_post_identifier"
+                      value="{{ liking_post_identifier or '' }}"
+                      class="form-control"
+                      placeholder="https://x.com/.../status/123 or 123"
+                    >
+                    <div class="mt-2">
+                      <label class="form-label small x-muted mb-1">Or pick a saved post</label>
+                      <select class="form-select" name="liking_post_select" id="likingPostSelect">
+                        <option value="">Select a post from the database</option>
+                        {% for post in existing_posts %}
+                          <option value="{{ post.id }}" {% if liking_post_select == (post.id | string) %}selected{% endif %}>
+                            {{ post.id }}{% if post.text %} · {{ post.text[:60] }}{% endif %}
+                          </option>
+                        {% endfor %}
+                      </select>
+                    </div>
+                    <div class="row g-2 mt-2">
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Max results</label>
+                        <input
+                          type="number"
+                          name="liking_max_results"
+                          min="1"
+                          max="100"
+                          class="form-control"
+                          value="{{ liking_max_results or '' }}"
+                          placeholder="100"
+                        >
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Pagination token (optional)</label>
+                        <input
+                          type="text"
+                          name="liking_pagination_token"
+                          class="form-control"
+                          value="{{ liking_pagination_token or '' }}"
+                          placeholder="pagination_token"
+                        >
+                      </div>
+                    </div>
+                    <div class="d-flex align-items-center justify-content-between mt-2">
+                      <div class="form-text">Requires OAuth user token.</div>
+                      <button class="btn btn-outline-dark" type="submit" name="likes_action" value="liking_users">Get liking users</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# Like / Unlike #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hManageLikes">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cManageLikes" aria-expanded="false" aria-controls="cManageLikes">
+                  Like / Unlike a post
+                </button>
+              </h2>
+              <div id="cManageLikes" class="accordion-collapse collapse" aria-labelledby="hManageLikes" data-bs-parent="#likesAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">Post ID or URL</label>
+                    <div class="input-group mb-3">
+                      <input
+                        type="text"
+                        name="like_post_identifier"
+                        value="{{ like_post_identifier or '' }}"
+                        class="form-control"
+                        placeholder="https://x.com/.../status/123 or 123"
+                      >
+                      <button class="btn btn-outline-dark" type="submit" name="likes_action" value="like">Like</button>
+                      <button class="btn btn-outline-dark" type="submit" name="likes_action" value="unlike">Unlike</button>
+                    </div>
+                    <label class="form-label small x-muted mb-1">Or pick a saved post</label>
+                    <select class="form-select" name="like_post_select" id="likePostSelect">
+                      <option value="">Select a post from the database</option>
+                      {% for post in existing_posts %}
+                        <option value="{{ post.id }}" {% if like_post_select == (post.id | string) %}selected{% endif %}>
+                          {{ post.id }}{% if post.text %} · {{ post.text[:60] }}{% endif %}
+                        </option>
+                      {% endfor %}
+                    </select>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                  </form>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {% if result %}
+            <hr class="my-4">
+
+            <div class="row g-2">
+              <div class="col-12">
+                <button
+                  class="btn btn-link text-decoration-none p-0"
+                  type="button"
+                  data-bs-toggle="collapse"
+                  data-bs-target="#rawResponse"
+                  aria-expanded="false"
+                  aria-controls="rawResponse"
+                >
+                  View raw X API response
+                </button>
+              </div>
+              <div class="col-12">
+                <div id="rawResponse" class="collapse mt-2">
+                  <pre class="x-pre">{{ result | tojson(indent=2) }}</pre>
+                </div>
+              </div>
+            </div>
+
+            {% if token_scope %}
+              <div class="form-text mt-2">Token scopes: {{ token_scope }}</div>
+            {% endif %}
+
+            {% if curl_preview %}
+              <div class="row g-2 mt-3">
+                <div class="col-12 d-flex align-items-center justify-content-between">
+                  <button
+                    class="btn btn-link text-decoration-none p-0"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#curlPreview"
+                    aria-expanded="false"
+                    aria-controls="curlPreview"
+                  >
+                    View sanitized curl command
+                  </button>
+                  <button
+                    class="btn btn-sm btn-outline-dark"
+                    type="button"
+                    data-copy-target="#curlPreviewBox"
+                    onclick="
+                      const el = document.querySelector(this.getAttribute('data-copy-target'));
+                      if (!el) return;
+                      const text = el.textContent || '';
+                      navigator.clipboard.writeText(text);
+                      const original = this.textContent;
+                      this.textContent = 'Copied!';
+                      setTimeout(() => this.textContent = original, 1200);
+                    "
+                  >
+                    Copy curl
+                  </button>
+                </div>
+                <div class="col-12">
+                  <div id="curlPreview" class="collapse mt-2">
+                    <textarea
+                      id="curlPreviewBox"
+                      class="form-control font-monospace"
+                      rows="6"
+                      style="width: 100%; resize: vertical;"
+                      readonly
+                    >{{ curl_preview }}</textarea>
+                    <div class="form-text">
+                      Sanitized curl is safe to share. Click “Copy curl” to copy the full command.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            {% endif %}
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    {# RIGHT: Results #}
+    <div class="col-lg-7">
+      {% if result %}
+        {% if result.data is mapping and (result.data.liked is defined) %}
+          {% set action_result = result.data %}
+          {% set users = [] %}
+          {% set posts = [] %}
+        {% else %}
+          {% set action_result = None %}
+          {% set users = [] %}
+          {% set posts = [] %}
+          {% if result.data is sequence %}
+            {% set first_item = result.data[0] if result.data|length > 0 else None %}
+            {% if first_item and first_item.text is defined %}
+              {% set posts = result.data %}
+            {% elif first_item and first_item.username is defined %}
+              {% set users = result.data %}
+            {% endif %}
+          {% endif %}
+        {% endif %}
+
+        <div class="row g-4">
+          {% if action_result %}
+            <div class="col-12">
+              <div class="card x-card shadow-sm">
+                <div class="card-body text-center">
+                  <div class="x-muted small mb-1">Action result</div>
+                  <div class="fw-semibold">
+                    Liked: {{ "true" if action_result.liked else "false" }}
+                  </div>
+                </div>
+              </div>
+            </div>
+          {% endif %}
+
+          {% if posts|length == 0 and users|length == 0 and not action_result %}
+            <div class="col-12">
+              <div class="card x-card shadow-sm">
+                <div class="card-body text-center text-muted">
+                  No results returned for this request.
+                </div>
+              </div>
+            </div>
+          {% endif %}
+
+          {% for post in posts %}
+            {% set metrics = post.public_metrics if post.public_metrics is defined else {} %}
+            <div class="col-12">
+              <div class="card x-card shadow-sm">
+                <div class="card-body">
+                  <div class="d-flex align-items-start justify-content-between">
+                    <div class="pe-3">
+                      <div class="x-muted small mb-2">Post</div>
+                      <div class="fw-semibold mb-2">{{ post.text or "No text available." }}</div>
+                      <div class="d-flex flex-wrap gap-2">
+                        <span class="x-pill">ID: {{ post.id }}</span>
+                        {% if post.created_at %}
+                          <span class="x-pill">{{ post.created_at }}</span>
+                        {% endif %}
+                        {% if post.author_id %}
+                          <span class="x-pill">Author: {{ post.author_id }}</span>
+                        {% endif %}
+                      </div>
+                    </div>
+                    <div class="d-flex flex-column gap-2" style="min-width: 140px;">
+                      <a
+                        class="btn btn-dark"
+                        target="_blank"
+                        rel="noopener"
+                        href="https://x.com/i/web/status/{{ post.id }}"
+                      >
+                        Open on X
+                      </a>
+                      <button class="btn btn-outline-dark" type="button"
+                        onclick="navigator.clipboard.writeText('{{ post.id }}')"
+                      >
+                        Copy ID
+                      </button>
+                    </div>
+                  </div>
+
+                  <hr class="my-4">
+
+                  <div class="row g-3">
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Likes</div>
+                        <div class="value">{{ metrics.like_count | default(0) }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Replies</div>
+                        <div class="value">{{ metrics.reply_count | default(0) }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Reposts</div>
+                        <div class="value">{{ metrics.retweet_count | default(0) }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Quotes</div>
+                        <div class="value">{{ metrics.quote_count | default(0) }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          {% endfor %}
+
+          {% for user in users %}
+            {% set metrics = user.public_metrics if user.public_metrics is defined else {} %}
+            <div class="col-12">
+              <div class="card x-card shadow-sm">
+                <div class="card-body">
+                  <div class="d-flex align-items-start justify-content-between">
+                    <div class="pe-3">
+                      <h4 class="mb-1">{{ user.name }}</h4>
+                      <div class="d-flex flex-wrap gap-2">
+                        <span class="x-pill">@{{ user.username }}</span>
+                        {% if user.verified %}
+                          <span class="badge text-bg-primary">Verified</span>
+                        {% endif %}
+                        {% if user.location %}
+                          <span class="x-pill">{{ user.location }}</span>
+                        {% endif %}
+                      </div>
+                      {% if user.description %}
+                        <p class="mt-3 mb-0 x-muted">{{ user.description }}</p>
+                      {% endif %}
+                    </div>
+                    <div class="d-flex flex-column gap-2" style="min-width: 140px;">
+                      <a
+                        class="btn btn-dark"
+                        target="_blank"
+                        rel="noopener"
+                        href="https://x.com/{{ user.username }}"
+                      >
+                        Open on X
+                      </a>
+                      <button class="btn btn-outline-dark" type="button"
+                        onclick="navigator.clipboard.writeText('{{ user.id }}')"
+                      >
+                        Copy ID
+                      </button>
+                    </div>
+                  </div>
+
+                  <hr class="my-4">
+
+                  <div class="row g-3">
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Followers</div>
+                        <div class="value">{{ metrics.followers_count | default(0) }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Following</div>
+                        <div class="value">{{ metrics.following_count | default(0) }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Posts</div>
+                        <div class="value">{{ metrics.tweet_count | default(0) }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Likes</div>
+                        <div class="value">{{ metrics.like_count | default(0) }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="card x-card shadow-sm">
+          <div class="card-body text-center py-5">
+            <div class="display-6 mb-2">❤️</div>
+            <div class="fw-semibold">No results yet</div>
+            <div class="x-muted">Run a likes action to see results here.</div>
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  document.querySelectorAll('.toast').forEach((toastEl) => {
+    new bootstrap.Toast(toastEl, { delay: 3500 }).show();
+  });
+
+  const likedUserSelect = document.getElementById('likedUserSelect');
+  const likedUserInput = document.querySelector('input[name="liked_user_identifier"]');
+  if (likedUserSelect && likedUserInput) {
+    likedUserSelect.addEventListener('change', () => {
+      if (likedUserSelect.value) {
+        likedUserInput.value = likedUserSelect.value;
+      }
+    });
+  }
+
+  const likingPostSelect = document.getElementById('likingPostSelect');
+  const likingPostInput = document.querySelector('input[name="liking_post_identifier"]');
+  if (likingPostSelect && likingPostInput) {
+    likingPostSelect.addEventListener('change', () => {
+      if (likingPostSelect.value) {
+        likingPostInput.value = likingPostSelect.value;
+      }
+    });
+  }
+
+  const likePostSelect = document.getElementById('likePostSelect');
+  const likePostInput = document.querySelector('input[name="like_post_identifier"]');
+  if (likePostSelect && likePostInput) {
+    likePostSelect.addEventListener('change', () => {
+      if (likePostSelect.value) {
+        likePostInput.value = likePostSelect.value;
+      }
+    });
+  }
+</script>
+{% endblock %}
