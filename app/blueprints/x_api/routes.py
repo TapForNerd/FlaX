@@ -10,6 +10,7 @@ from app.blueprints.auth.token_helpers import call_x_api_with_refresh
 from app.blueprints.x_api.commands import x_api_cli
 from app.blueprints.x_api.helpers import (
     EXPANSIONS,
+    COMMUNITY_FIELDS,
     LIST_EXPANSIONS,
     LIST_FIELDS,
     SPACE_EXPANSIONS,
@@ -23,6 +24,7 @@ from app.blueprints.x_api.helpers import (
     delete_x_list,
     follow_x_list,
     get_api_request_history,
+    get_x_community_by_id,
     get_my_x_user,
     get_x_list_by_id,
     get_x_list_followers,
@@ -51,6 +53,7 @@ from app.blueprints.x_api.helpers import (
     remove_x_list_member,
     resolve_x_user_id,
     resolve_x_post_id,
+    search_x_communities,
     unmute_x_user,
     unfollow_x_list,
     unlike_x_post,
@@ -558,6 +561,176 @@ def likes():
         token_scope=token_scope,
         existing_users=XUser.query.order_by(XUser.username.asc()).limit(200).all(),
         existing_posts=XPost.query.order_by(XPost.created_at.desc()).limit(200).all(),
+    )
+
+
+@bp.route("/communities", methods=["GET", "POST"])
+@login_required
+def communities():
+    community_id = ""
+    search_query = ""
+    search_max_results = ""
+    search_next_token = ""
+    search_pagination_token = ""
+    result = None
+    error = session.get("x_communities_lookup_error")
+    known_limit = session.get("x_communities_known_limit")
+    curl_preview = session.get("x_communities_lookup_curl")
+    log_id = session.get("x_communities_lookup_log_id")
+
+    if log_id:
+        log = ApiRequestLog.query.get(log_id)
+        if log and log.response_body:
+            body = log.response_body
+            try:
+                result = json.loads(body)
+            except json.JSONDecodeError:
+                result = None
+                if body.startswith('"') and body.endswith('"'):
+                    try:
+                        unescaped = json.loads(body)
+                        if isinstance(unescaped, str) and unescaped.lstrip().startswith(("{", "[")):
+                            result = json.loads(unescaped)
+                    except json.JSONDecodeError:
+                        result = None
+                if result is None:
+                    result = {"raw": body}
+        if isinstance(result, dict) and isinstance(result.get("raw"), str):
+            raw_payload = result["raw"].lstrip()
+            if raw_payload.startswith(("{", "[")):
+                try:
+                    result = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    pass
+
+    if request.method == "POST":
+        known_limit = None
+        community_id = request.form.get("community_id", "").strip()
+        search_query = request.form.get("search_query", "").strip()
+        search_max_results = request.form.get("search_max_results", "").strip()
+        search_next_token = request.form.get("search_next_token", "").strip()
+        search_pagination_token = request.form.get("search_pagination_token", "").strip()
+        curl_preview = None
+
+        def build_curl(url: str, params_dict: dict | None = None) -> str:
+            if not params_dict:
+                return f'curl -H "Authorization: Bearer <token>" "{url}"'
+            query = urlencode(params_dict, safe=",")
+            return f'curl -H "Authorization: Bearer <token>" "{url}?{query}"'
+
+        action = request.form.get("communities_action")
+        response = None
+        if action == "community_by_id":
+            if not community_id:
+                error = "Please provide a Community ID."
+                flash(error, "warning")
+            else:
+                flash("Community lookup started.", "info")
+                response = get_x_community_by_id(community_id)
+                params = {"community.fields": ",".join(_filter_fields(COMMUNITY_FIELDS))}
+                curl_preview = build_curl("https://api.x.com/2/communities/<ID>", params)
+        elif action == "search_communities":
+            if not search_query:
+                error = "Please provide a search query."
+                flash(error, "warning")
+            else:
+                try:
+                    max_results = int(search_max_results) if search_max_results else 10
+                except ValueError:
+                    max_results = 10
+                max_results = min(max(max_results, 10), 100)
+                flash("Community search started.", "info")
+                response = search_x_communities(
+                    search_query,
+                    max_results=max_results,
+                    next_token=search_next_token or None,
+                    pagination_token=search_pagination_token or None,
+                )
+                params = {
+                    "query": "<QUERY>",
+                    "max_results": max_results,
+                    "community.fields": ",".join(_filter_fields(COMMUNITY_FIELDS)),
+                }
+                if search_next_token:
+                    params["next_token"] = "<NEXT_TOKEN>"
+                if search_pagination_token:
+                    params["pagination_token"] = "<PAGINATION_TOKEN>"
+                curl_preview = build_curl("https://api.x.com/2/communities/search", params)
+        else:
+            response = None
+            error = "Please select a communities action to run."
+            flash("Please select an action first.", "warning")
+
+        if response is None and error is None:
+            error = "Unable to call X API; check your credentials."
+            result = None
+            flash("Lookup failed. Check your credentials.", "danger")
+        elif response is not None:
+            def extract_problem(payload: dict) -> dict | None:
+                if not isinstance(payload, dict):
+                    return None
+                if payload.get("type") or payload.get("title"):
+                    return payload
+                errors = payload.get("errors")
+                if isinstance(errors, list) and errors:
+                    return errors[0]
+                return None
+
+            if isinstance(response, dict):
+                result = response
+                problem = extract_problem(result)
+                if problem and (
+                    problem.get("type") == "https://api.twitter.com/2/problems/unsupported-authentication"
+                    or problem.get("title") == "Unsupported Authentication"
+                ):
+                    known_limit = (
+                        "X returned Unsupported Authentication for this endpoint. "
+                        "Community lookup requires OAuth user context."
+                    )
+                    error = known_limit
+                    flash(known_limit, "warning")
+                if response.get("error"):
+                    flash(response["error"], "warning")
+                else:
+                    flash("Lookup complete.", "success")
+            else:
+                try:
+                    result = response.json()
+                except ValueError:
+                    result = {"raw": response.text}
+                problem = extract_problem(result)
+                if problem and (
+                    problem.get("type") == "https://api.twitter.com/2/problems/unsupported-authentication"
+                    or problem.get("title") == "Unsupported Authentication"
+                ):
+                    known_limit = (
+                        "X returned Unsupported Authentication for this endpoint. "
+                        "Community lookup requires OAuth user context."
+                    )
+                    error = known_limit
+                    flash(known_limit, "warning")
+                if response.status_code and response.status_code >= 400:
+                    flash(f"Lookup failed with status {response.status_code}.", "danger")
+                else:
+                    flash("Lookup complete.", "success")
+
+        session["x_communities_lookup_log_id"] = session.get("x_last_api_log_id")
+        session["x_communities_lookup_error"] = error
+        session["x_communities_lookup_curl"] = curl_preview
+        session["x_communities_known_limit"] = known_limit
+        return redirect(url_for("x_api.communities"))
+
+    return render_template(
+        "x_api/communities.html",
+        community_id=community_id,
+        search_query=search_query,
+        search_max_results=search_max_results,
+        search_next_token=search_next_token,
+        search_pagination_token=search_pagination_token,
+        result=result,
+        error=error,
+        known_limit=known_limit,
+        curl_preview=curl_preview,
     )
 
 

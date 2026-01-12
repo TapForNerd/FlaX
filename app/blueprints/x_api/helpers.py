@@ -93,6 +93,16 @@ LIST_EXPANSIONS = [
     "owner_id",
 ]
 
+COMMUNITY_FIELDS = [
+    "access",
+    "created_at",
+    "description",
+    "id",
+    "join_policy",
+    "member_count",
+    "name",
+]
+
 TWEET_EXPANSIONS = [
     "author_id",
 ]
@@ -1305,6 +1315,97 @@ def unlike_x_post(post_id: str) -> Any:
     )
     print(response.text)
     db.session.commit()
+    return response
+
+
+def get_x_community_by_id(community_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/communities/{community_id}",
+        params={"community.fields": ",".join(_filter_fields(COMMUNITY_FIELDS))},
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/communities/{community_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def search_x_communities(
+    query: str,
+    max_results: int = 10,
+    next_token: str | None = None,
+    pagination_token: str | None = None,
+) -> Any:
+    params = {
+        "query": query,
+        "max_results": max_results,
+        "community.fields": ",".join(_filter_fields(COMMUNITY_FIELDS)),
+    }
+    if next_token:
+        params["next_token"] = next_token
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+
+    response = call_x_api_with_refresh(
+        requests.get,
+        "https://api.x.com/2/communities/search",
+        params=params,
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            "https://api.x.com/2/communities/search",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
     return response
 
 

@@ -1,0 +1,915 @@
+{% extends "base.html" %}
+
+{% block title %}X Spaces{% endblock %}
+
+{% block content %}
+
+<style>
+  .x-card {
+    border: 0;
+    border-radius: 1rem;
+    position: relative;
+    overflow: hidden;
+  }
+  .x-muted { color: rgba(0,0,0,.60); }
+  .x-pill {
+    border: 1px solid rgba(0,0,0,.10);
+    border-radius: 999px;
+    padding: .35rem .65rem;
+    font-size: .85rem;
+    background: #fff;
+  }
+  .x-kpi {
+    border: 1px solid rgba(0,0,0,.08);
+    border-radius: .9rem;
+    padding: .85rem .9rem;
+    background: #fff;
+  }
+  .x-kpi .label { font-size: .8rem; color: rgba(0,0,0,.55); }
+  .x-kpi .value { font-size: 1.15rem; font-weight: 700; line-height: 1.1; }
+  .x-avatar-sm {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    object-fit: cover;
+    background: #e2e8f0;
+  }
+  .x-user-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: .5rem;
+    border: 1px solid rgba(0,0,0,.08);
+    border-radius: 999px;
+    padding: .3rem .65rem;
+    margin: .25rem .35rem 0 0;
+    background: #fff;
+  }
+  pre.x-pre {
+    max-height: 340px;
+    overflow: auto;
+    background: #0b1020;
+    color: #d7e2ff;
+    border-radius: .75rem;
+    padding: 1rem;
+    font-size: .85rem;
+    margin: 0;
+  }
+</style>
+
+<div class="container-fluid py-4">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 1080;">
+        {% for category, message in messages %}
+          <div class="toast text-bg-{{ category }} border-0 mb-2" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="d-flex">
+              <div class="toast-body">{{ message }}</div>
+              <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <div class="d-flex align-items-end justify-content-between mb-3">
+    <div>
+      <h3 class="mb-1">X Spaces</h3>
+      <div class="x-muted">Search, lookup, and track Spaces across live and scheduled sessions.</div>
+    </div>
+  </div>
+
+  <div class="row g-4">
+    <div class="col-lg-5">
+      <div class="card x-card shadow-sm">
+        <div class="card-body p-3 p-md-4">
+          <div class="d-flex align-items-center justify-content-between mb-3">
+            <div>
+              <h5 class="mb-1">Spaces toolbox</h5>
+              <div class="x-muted small">Search by keyword, Space ID, or creator.</div>
+            </div>
+            <span class="badge text-bg-light border">X API</span>
+          </div>
+
+          {% if error %}
+            <div class="alert alert-warning d-flex align-items-start gap-2 mb-3">
+              <div class="fw-semibold">Heads up:</div>
+              <div class="flex-grow-1">{{ error }}</div>
+            </div>
+          {% endif %}
+
+          <div class="accordion" id="spacesAccordion">
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hSpaceSearch">
+                <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#cSpaceSearch" aria-expanded="true" aria-controls="cSpaceSearch">
+                  Search Spaces by keyword
+                </button>
+              </h2>
+              <div id="cSpaceSearch" class="accordion-collapse collapse show" aria-labelledby="hSpaceSearch" data-bs-parent="#spacesAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">Search query</label>
+                    <input
+                      type="text"
+                      name="space_search_query"
+                      value="{{ space_search_query or '' }}"
+                      class="form-control"
+                      placeholder="crypto, tech, community"
+                    >
+                    <div class="row g-2 mt-2">
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">State</label>
+                        <select class="form-select" name="space_search_state">
+                          {% set selected_state = space_search_state or 'all' %}
+                          <option value="all" {% if selected_state == 'all' %}selected{% endif %}>All</option>
+                          <option value="live" {% if selected_state == 'live' %}selected{% endif %}>Live</option>
+                          <option value="scheduled" {% if selected_state == 'scheduled' %}selected{% endif %}>Scheduled</option>
+                        </select>
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Max results</label>
+                        <input
+                          type="number"
+                          name="space_search_max_results"
+                          min="1"
+                          max="100"
+                          class="form-control"
+                          value="{{ space_search_max_results or '' }}"
+                          placeholder="100"
+                        >
+                      </div>
+                    </div>
+                    <div class="mt-2">
+                      <label class="form-label small x-muted mb-1">Next token (optional)</label>
+                      <input
+                        type="text"
+                        name="space_search_next_token"
+                        class="form-control"
+                        value="{{ space_search_next_token or '' }}"
+                        placeholder="next_token"
+                      >
+                      <div class="form-text">Use the token from a previous search to fetch the next page.</div>
+                    </div>
+                    <div class="d-flex align-items-center justify-content-between mt-2">
+                      <div class="form-text">Search upcoming and live Spaces.</div>
+                      <button class="btn btn-outline-dark" type="submit" name="spaces_action" value="search_spaces">Search</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hSpaceIds">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cSpaceIds" aria-expanded="false" aria-controls="cSpaceIds">
+                  Lookup by Space ID
+                </button>
+              </h2>
+              <div id="cSpaceIds" class="accordion-collapse collapse" aria-labelledby="hSpaceIds" data-bs-parent="#spacesAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">Space ID (comma-separated)</label>
+                    <textarea
+                      name="space_ids"
+                      class="form-control"
+                      rows="3"
+                      placeholder="1SLjjRYNejbKM, 1zqKVXPQhvZJB"
+                    >{{ space_ids or '' }}</textarea>
+                    <div class="d-flex align-items-center justify-content-between mt-2">
+                      <div class="form-text">Lookup up to 100 IDs.</div>
+                      <button class="btn btn-outline-dark" type="submit" name="spaces_action" value="lookup_spaces">Lookup</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hCreator">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cCreator" aria-expanded="false" aria-controls="cCreator">
+                  Lookup by creator
+                </button>
+              </h2>
+              <div id="cCreator" class="accordion-collapse collapse" aria-labelledby="hCreator" data-bs-parent="#spacesAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">Creator IDs or usernames (comma-separated)</label>
+                    <textarea
+                      name="creator_identifier"
+                      class="form-control"
+                      rows="3"
+                      placeholder="@XDevelopers, 2244994945, @TwitterDev"
+                    >{{ creator_identifier or '' }}</textarea>
+                    <div class="mt-2">
+                      <label class="form-label small x-muted mb-1">Or pick an existing user</label>
+                      <select class="form-select" name="creator_user_select">
+                        <option value="">Select a user from the database</option>
+                        {% for user in existing_users %}
+                          <option value="{{ user.id }}" {% if creator_user_select == (user.id | string) %}selected{% endif %}>
+                            @{{ user.username }}{% if user.name %} · {{ user.name }}{% endif %} ({{ user.id }})
+                          </option>
+                        {% endfor %}
+                      </select>
+                    </div>
+                    <div class="d-flex align-items-center justify-content-between mt-2">
+                      <div class="form-text">Search for Spaces created by the user.</div>
+                      <button class="btn btn-outline-dark" type="submit" name="spaces_action" value="lookup_creators">Lookup</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hSpacePosts">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cSpacePosts" aria-expanded="false" aria-controls="cSpacePosts">
+                  Get Space posts
+                </button>
+              </h2>
+              <div id="cSpacePosts" class="accordion-collapse collapse" aria-labelledby="hSpacePosts" data-bs-parent="#spacesAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">Space ID</label>
+                    <input
+                      type="text"
+                      name="space_posts_id"
+                      value="{{ space_posts_id or '' }}"
+                      class="form-control"
+                      placeholder="1SLjjRYNejbKM"
+                    >
+                    <div class="mt-2">
+                      <label class="form-label small x-muted mb-1">Max results</label>
+                      <input
+                        type="number"
+                        name="space_posts_max_results"
+                        min="1"
+                        max="100"
+                        class="form-control"
+                        value="{{ space_posts_max_results or '' }}"
+                        placeholder="100"
+                      >
+                    </div>
+                    <div class="d-flex align-items-center justify-content-between mt-2">
+                      <div class="form-text">Fetch posts shared in a Space.</div>
+                      <button class="btn btn-outline-dark" type="submit" name="spaces_action" value="space_posts">Get posts</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-7">
+      <div class="card x-card shadow-sm h-100">
+        <div class="card-body p-3 p-md-4 d-flex flex-column">
+          <div class="d-flex align-items-center justify-content-between mb-3">
+            <div>
+              <h5 class="mb-1">Spaces response</h5>
+              <div class="x-muted small">Match results with users you already know.</div>
+            </div>
+            {% if curl_preview %}
+              <span class="x-pill">curl ready</span>
+            {% endif %}
+          </div>
+
+          {% if curl_preview %}
+            <div class="mb-3">
+              <div class="x-muted small mb-1">Curl preview</div>
+              <pre class="x-pre">{{ curl_preview }}</pre>
+            </div>
+          {% endif %}
+
+          {% if result %}
+            {% set known_users_by_id = known_users_by_id if known_users_by_id is mapping else {} %}
+            {% set spaces = result.data if result.data is sequence else [] %}
+            {% set tweets = result.data if result.data is sequence else [] %}
+            {% if spaces|length > 0 %}
+              <div class="table-responsive mb-3">
+                <table class="table table-sm align-middle">
+                  <thead class="table-light">
+                    <tr>
+                      <th>Space ID</th>
+                      <th>Title</th>
+                      <th>State</th>
+                      <th>Creator</th>
+                      <th>Known user</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for space in spaces %}
+                      {% set creator = known_users_by_id.get(space.creator_id) if space.creator_id else None %}
+                      <tr>
+                        <td>
+                          <button
+                            type="button"
+                            class="btn btn-link p-0 text-decoration-none space-detail"
+                            data-bs-toggle="modal"
+                            data-bs-target="#spaceDetailModal"
+                            data-space='{{ space | tojson }}'
+                            data-snapshots='{{ space_snapshots_by_id.get(space.id, []) | tojson }}'
+                          >
+                            <code>{{ space.id }}</code>
+                          </button>
+                        </td>
+                        <td>{{ space.title or "Untitled" }}</td>
+                        <td class="text-capitalize">{{ space.state or "-" }}</td>
+                        <td>{{ space.creator_id or "-" }}</td>
+                        <td>
+                          {% if creator %}
+                            @{{ creator.username }}{% if creator.name %} · {{ creator.name }}{% endif %}
+                          {% else %}
+                            <span class="x-muted">Not in database</span>
+                          {% endif %}
+                        </td>
+                        <td>
+                          <form method="post" class="d-inline">
+                            <input type="hidden" name="spaces_action" value="poll_space">
+                            <input type="hidden" name="space_poll_id" value="{{ space.id }}">
+                            <button class="btn btn-sm btn-outline-dark" type="submit">Poll</button>
+                          </form>
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% endif %}
+
+            {% if tweets|length > 0 and tweets[0].text is defined %}
+              <div class="table-responsive mb-3">
+                <table class="table table-sm align-middle">
+                  <thead class="table-light">
+                    <tr>
+                      <th>Post ID</th>
+                      <th>Text</th>
+                      <th>Author</th>
+                      <th>Created</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for post in tweets %}
+                      <tr>
+                        <td><code>{{ post.id }}</code></td>
+                        <td>{{ post.text }}</td>
+                        <td>{{ post.author_id or "-" }}</td>
+                        <td>{{ post.created_at or "-" }}</td>
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
+              </div>
+            {% endif %}
+
+            {% if result.meta and result.meta.next_token %}
+              <div class="alert alert-info d-flex align-items-center justify-content-between">
+                <div>
+                  <div class="fw-semibold">Next page available</div>
+                  <div class="small">Use this next token in the search form to fetch more results.</div>
+                </div>
+                <code>{{ result.meta.next_token }}</code>
+              </div>
+            {% endif %}
+
+            <div class="x-muted small mb-1">Raw response</div>
+            <pre class="x-pre">{{ result | tojson(indent=2) }}</pre>
+          {% else %}
+            <div class="flex-grow-1 d-flex align-items-center justify-content-center text-center">
+              <div>
+                <div class="fw-semibold">No Spaces fetched yet</div>
+                <div class="x-muted">Run a search or lookup to see results here.</div>
+              </div>
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card x-card shadow-sm mt-4">
+    <div class="card-body p-3 p-md-4">
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <div>
+          <h5 class="mb-1">Upcoming and live Spaces</h5>
+          <div class="x-muted small">Server-side table of scheduled and live Spaces.</div>
+        </div>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-sm align-middle" id="spacesUpcomingTable">
+          <thead class="table-light">
+            <tr>
+              <th>Space ID</th>
+              <th>Title</th>
+              <th>State</th>
+              <th>Scheduled</th>
+              <th>Creator</th>
+              <th>Known user</th>
+              <th>Participants</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% if upcoming_spaces %}
+              {% for space in upcoming_spaces %}
+                <tr>
+                  <td>
+                    <button
+                      type="button"
+                      class="btn btn-link p-0 text-decoration-none space-detail"
+                      data-bs-toggle="modal"
+                      data-bs-target="#spaceDetailModal"
+                      data-space='{{ space.raw_space_data | tojson }}'
+                      data-snapshots='{{ space.snapshots | tojson }}'
+                    >
+                      <code>{{ space.id }}</code>
+                    </button>
+                  </td>
+                  <td>{{ space.title or "Untitled" }}</td>
+                  <td class="text-capitalize">{{ space.state or "-" }}</td>
+                  <td>{{ space.scheduled_start or space.started_at or "-" }}</td>
+                  <td>{{ space.creator_id or "-" }}</td>
+                    <td>
+                      {% if space.creator_user %}
+                        @{{ space.creator_user.username }}{% if space.creator_user.name %} · {{ space.creator_user.name }}{% endif %}
+                      {% else %}
+                        <span class="x-muted">Not in database</span>
+                      {% endif %}
+                    </td>
+                    <td>{{ space.participant_count if space.participant_count is not none else "-" }}</td>
+                    <td>
+                      <form method="post" class="d-inline">
+                        <input type="hidden" name="spaces_action" value="poll_space">
+                        <input type="hidden" name="space_poll_id" value="{{ space.id }}">
+                        <button class="btn btn-sm btn-outline-dark" type="submit">Poll</button>
+                      </form>
+                    </td>
+                  </tr>
+                {% endfor %}
+            {% else %}
+              <tr>
+                <td colspan="8" class="text-center x-muted">No upcoming or live Spaces yet.</td>
+              </tr>
+            {% endif %}
+          </tbody>
+        </table>
+      </div>
+
+      <div class="mt-3">
+        <button class="btn btn-outline-dark" type="button" data-bs-toggle="collapse" data-bs-target="#endedSpacesTable" aria-expanded="false" aria-controls="endedSpacesTable">
+          Toggle ended Spaces
+        </button>
+      </div>
+      <div class="collapse mt-3" id="endedSpacesTable">
+        <div class="table-responsive">
+          <table class="table table-sm align-middle" id="spacesEndedTable">
+            <thead class="table-light">
+              <tr>
+                <th>Space ID</th>
+                <th>Title</th>
+                <th>Ended</th>
+                <th>Creator</th>
+                <th>Known user</th>
+                <th>Participants</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% if ended_spaces %}
+                {% for space in ended_spaces %}
+                  <tr>
+                  <td>
+                    <button
+                      type="button"
+                      class="btn btn-link p-0 text-decoration-none space-detail"
+                      data-bs-toggle="modal"
+                      data-bs-target="#spaceDetailModal"
+                      data-space='{{ space.raw_space_data | tojson }}'
+                      data-snapshots='{{ space.snapshots | tojson }}'
+                    >
+                      <code>{{ space.id }}</code>
+                    </button>
+                  </td>
+                    <td>{{ space.title or "Untitled" }}</td>
+                    <td>{{ space.ended_at or "-" }}</td>
+                    <td>{{ space.creator_id or "-" }}</td>
+                    <td>
+                      {% if space.creator_user %}
+                        @{{ space.creator_user.username }}{% if space.creator_user.name %} · {{ space.creator_user.name }}{% endif %}
+                      {% else %}
+                        <span class="x-muted">Not in database</span>
+                      {% endif %}
+                    </td>
+                    <td>{{ space.participant_count if space.participant_count is not none else "-" }}</td>
+                    <td>
+                      <form method="post" class="d-inline">
+                        <input type="hidden" name="spaces_action" value="poll_space">
+                        <input type="hidden" name="space_poll_id" value="{{ space.id }}">
+                        <button class="btn btn-sm btn-outline-dark" type="submit">Poll</button>
+                      </form>
+                    </td>
+                  </tr>
+                {% endfor %}
+              {% else %}
+                <tr>
+                  <td colspan="7" class="text-center x-muted">No ended Spaces available.</td>
+                </tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="spaceDetailModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Space details</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <div class="fw-semibold">Attendance history</div>
+            <div class="x-muted small mb-2">Participant count over polling time.</div>
+            <div class="border rounded p-2 bg-white">
+              <svg id="spaceHistoryChart" viewBox="0 0 900 320" width="100%" height="320" aria-label="Space attendance history"></svg>
+            </div>
+          </div>
+          <div class="mb-3" id="spaceDetailSummary"></div>
+          <div class="mb-3" id="spaceDetailUsers"></div>
+          <pre class="x-pre" id="spaceDetailContent">{}</pre>
+        </div>
+        <div class="modal-footer">
+          <form method="post" id="spacePollForm" class="ms-auto">
+            <input type="hidden" name="spaces_action" value="poll_space">
+            <input type="hidden" name="space_poll_id" id="spacePollId" value="">
+            <button class="btn btn-outline-dark" type="submit">Poll</button>
+          </form>
+          <button class="btn btn-outline-secondary" type="button" id="spaceRefreshUsersButton">Refresh users</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function renderUserPill(user) {
+      if (!user) return "";
+      const displayName = user.name ? `${user.name}` : `@${user.username}`;
+      const handle = user.username ? `@${user.username}` : user.id;
+      const avatar = user.profile_image_url || "";
+      return `
+        <div class="x-user-pill">
+          <img class="x-avatar-sm" src="${avatar}" alt="${handle}" onerror="this.style.display='none'">
+          <div>
+            <div class="fw-semibold small">${displayName}</div>
+            <div class="x-muted small">${handle}</div>
+          </div>
+        </div>
+      `;
+    }
+
+    function renderSpaceSummary(detail) {
+      const space = detail.space || {};
+      const users = detail.users || {};
+      const creator = users[space.creator_id] || null;
+      const hosts = (space.host_ids || []).map((id) => users[id]).filter(Boolean);
+      const speakers = (space.speaker_ids || []).map((id) => users[id]).filter(Boolean);
+      const hostUnknown = (space.host_ids || []).filter((id) => !users[id]);
+      const speakerUnknown = (space.speaker_ids || []).filter((id) => !users[id]);
+      const creatorUnknown = space.creator_id && !users[space.creator_id];
+
+      const summaryTarget = document.getElementById("spaceDetailSummary");
+      const usersTarget = document.getElementById("spaceDetailUsers");
+      if (!summaryTarget || !usersTarget) return;
+
+      summaryTarget.innerHTML = `
+        <div class="row g-3">
+          <div class="col-md-8">
+            <div class="x-kpi">
+              <div class="label">Title</div>
+              <div class="value">${space.title || "Untitled"}</div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="x-kpi">
+              <div class="label">State</div>
+              <div class="value text-capitalize">${space.state || "-"}</div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="x-kpi">
+              <div class="label">Participants</div>
+              <div class="value">${space.participant_count ?? "-"}</div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="x-kpi">
+              <div class="label">Subscribers</div>
+              <div class="value">${space.subscriber_count ?? "-"}</div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="x-kpi">
+              <div class="label">Scheduled</div>
+              <div class="value">${space.scheduled_start || "-"}</div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="x-kpi">
+              <div class="label">Started</div>
+              <div class="value">${space.started_at || "-"}</div>
+            </div>
+          </div>
+          <div class="col-md-4">
+            <div class="x-kpi">
+              <div class="label">Ended</div>
+              <div class="value">${space.ended_at || "-"}</div>
+            </div>
+          </div>
+        </div>
+      `;
+
+      const unknownSummary = [];
+      if (creatorUnknown) {
+        unknownSummary.push(`Creator: ${space.creator_id}`);
+      }
+      if (hostUnknown.length) {
+        unknownSummary.push(`Hosts: ${hostUnknown.join(", ")}`);
+      }
+      if (speakerUnknown.length) {
+        unknownSummary.push(`Speakers: ${speakerUnknown.join(", ")}`);
+      }
+
+      usersTarget.innerHTML = `
+        <div class="mb-2 fw-semibold">Creator</div>
+        <div>${creator ? renderUserPill(creator) : '<span class="x-muted">No creator profile found.</span>'}</div>
+        <div class="mt-3 mb-2 fw-semibold">Hosts</div>
+        <div>${hosts.length ? hosts.map(renderUserPill).join("") : '<span class="x-muted">No hosts found.</span>'}</div>
+        <div class="mt-3 mb-2 fw-semibold">Speakers</div>
+        <div>${speakers.length ? speakers.map(renderUserPill).join("") : '<span class="x-muted">No speakers found.</span>'}</div>
+        ${unknownSummary.length ? `<div class="mt-3 x-muted small">Unknown users: ${unknownSummary.join(" · ")}</div>` : ""}
+      `;
+    }
+
+    function renderSpaceHistoryChart(snapshots) {
+      const svg = document.getElementById("spaceHistoryChart");
+      if (!svg) return;
+      const width = 900;
+      const height = 320;
+      const padding = { top: 20, right: 20, bottom: 50, left: 70 };
+      const innerWidth = width - padding.left - padding.right;
+      const innerHeight = height - padding.top - padding.bottom;
+
+      const rows = (snapshots || [])
+        .map((item) => ({
+          t: item.fetched_at ? new Date(item.fetched_at).getTime() : null,
+          v: typeof item.participant_count === "number" ? item.participant_count : null,
+        }))
+        .filter((item) => item.t && item.v !== null)
+        .sort((a, b) => a.t - b.t);
+
+      svg.innerHTML = "";
+
+      const axisColor = "#cbd5e1";
+      const textColor = "#334155";
+      const lineColor = "#111827";
+
+      const createEl = (name, attrs) => {
+        const el = document.createElementNS("http://www.w3.org/2000/svg", name);
+        Object.entries(attrs || {}).forEach(([key, value]) => el.setAttribute(key, value));
+        return el;
+      };
+
+      svg.appendChild(createEl("rect", {
+        x: 0,
+        y: 0,
+        width,
+        height,
+        fill: "#f8fafc",
+        rx: 8,
+      }));
+
+      svg.appendChild(createEl("line", {
+        x1: padding.left,
+        y1: padding.top,
+        x2: padding.left,
+        y2: padding.top + innerHeight,
+        stroke: axisColor,
+      }));
+      svg.appendChild(createEl("line", {
+        x1: padding.left,
+        y1: padding.top + innerHeight,
+        x2: padding.left + innerWidth,
+        y2: padding.top + innerHeight,
+        stroke: axisColor,
+      }));
+
+      const yLabel = createEl("text", {
+        x: 18,
+        y: padding.top + innerHeight / 2,
+        fill: textColor,
+        "font-size": "12",
+        "text-anchor": "middle",
+        transform: `rotate(-90 18 ${padding.top + innerHeight / 2})`,
+      });
+      yLabel.textContent = "Participants";
+      svg.appendChild(yLabel);
+
+      const xLabel = createEl("text", {
+        x: padding.left + innerWidth / 2,
+        y: height - 12,
+        fill: textColor,
+        "font-size": "12",
+        "text-anchor": "middle",
+      });
+      xLabel.textContent = "Polling time";
+      svg.appendChild(xLabel);
+
+      if (rows.length === 0) {
+        const empty = createEl("text", {
+          x: padding.left + innerWidth / 2,
+          y: padding.top + innerHeight / 2,
+          fill: textColor,
+          "font-size": "13",
+          "text-anchor": "middle",
+        });
+        empty.textContent = "No snapshots recorded yet.";
+        svg.appendChild(empty);
+        return;
+      }
+
+      const minT = rows[0].t;
+      const maxT = rows[rows.length - 1].t;
+      const maxV = Math.max(...rows.map((item) => item.v), 1);
+      const minV = Math.min(...rows.map((item) => item.v), 0);
+
+      const xScale = (t) => {
+        if (maxT === minT) return padding.left + innerWidth / 2;
+        return padding.left + ((t - minT) / (maxT - minT)) * innerWidth;
+      };
+      const yScale = (v) => {
+        if (maxV === minV) return padding.top + innerHeight / 2;
+        return padding.top + innerHeight - ((v - minV) / (maxV - minV)) * innerHeight;
+      };
+
+      const tickCount = Math.min(5, rows.length);
+      for (let i = 0; i < tickCount; i += 1) {
+        const row = rows[Math.floor((i / (tickCount - 1 || 1)) * (rows.length - 1))];
+        const x = xScale(row.t);
+        const label = new Date(row.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        svg.appendChild(createEl("text", {
+          x,
+          y: padding.top + innerHeight + 18,
+          fill: textColor,
+          "font-size": "11",
+          "text-anchor": "middle",
+        })).textContent = label;
+      }
+
+      const yTicks = 4;
+      for (let i = 0; i <= yTicks; i += 1) {
+        const value = Math.round(minV + ((maxV - minV) * i) / yTicks);
+        const y = yScale(value);
+        const tick = createEl("text", {
+          x: padding.left - 10,
+          y: y + 4,
+          fill: textColor,
+          "font-size": "11",
+          "text-anchor": "end",
+        });
+        tick.textContent = value.toString();
+        svg.appendChild(tick);
+        svg.appendChild(createEl("line", {
+          x1: padding.left,
+          y1: y,
+          x2: padding.left + innerWidth,
+          y2: y,
+          stroke: "#e2e8f0",
+        }));
+      }
+
+      const points = rows.map((row) => `${xScale(row.t)},${yScale(row.v)}`).join(" ");
+      svg.appendChild(createEl("polyline", {
+        points,
+        fill: "none",
+        stroke: lineColor,
+        "stroke-width": "2",
+      }));
+
+      rows.forEach((row) => {
+        svg.appendChild(createEl("circle", {
+          cx: xScale(row.t),
+          cy: yScale(row.v),
+          r: 3.5,
+          fill: lineColor,
+        }));
+      });
+    }
+
+    document.querySelectorAll(".space-detail").forEach((button) => {
+      button.addEventListener("click", async () => {
+        const payload = button.getAttribute("data-space");
+        const snapshotsPayload = button.getAttribute("data-snapshots");
+        const spaceId = button.querySelector("code") ? button.querySelector("code").textContent : "";
+        let formatted = payload || "{}";
+        let snapshots = [];
+        try {
+          formatted = JSON.stringify(JSON.parse(payload), null, 2);
+        } catch (error) {
+          formatted = payload || "{}";
+        }
+        try {
+          snapshots = JSON.parse(snapshotsPayload || "[]");
+        } catch (error) {
+          snapshots = [];
+        }
+        const target = document.getElementById("spaceDetailContent");
+        if (target) {
+          target.textContent = formatted;
+        }
+        const pollIdInput = document.getElementById("spacePollId");
+        if (pollIdInput) {
+          pollIdInput.value = spaceId;
+        }
+        renderSpaceHistoryChart(snapshots);
+
+        if (spaceId) {
+          try {
+            const response = await fetch(`/x/spaces/${spaceId}/detail`);
+            if (response.ok) {
+              const detail = await response.json();
+              renderSpaceSummary(detail);
+              if (detail.space) {
+                const raw = JSON.stringify(detail.space, null, 2);
+                const rawTarget = document.getElementById("spaceDetailContent");
+                if (rawTarget) {
+                  rawTarget.textContent = raw;
+                }
+              }
+              renderSpaceHistoryChart(detail.snapshots || []);
+            }
+          } catch (error) {
+            renderSpaceSummary({ space: {}, users: {} });
+          }
+        }
+      });
+    });
+
+    const pollForm = document.getElementById("spacePollForm");
+    if (pollForm) {
+      pollForm.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const formData = new FormData(pollForm);
+        try {
+          const response = await fetch("/x/spaces", {
+            method: "POST",
+            headers: { "X-Requested-With": "fetch" },
+            body: formData,
+          });
+          if (!response.ok) return;
+          const detail = await response.json();
+          if (detail.space) {
+            const rawTarget = document.getElementById("spaceDetailContent");
+            if (rawTarget) {
+              rawTarget.textContent = JSON.stringify(detail.space, null, 2);
+            }
+          }
+          renderSpaceSummary(detail);
+          renderSpaceHistoryChart(detail.snapshots || []);
+        } catch (error) {
+          return;
+        }
+      });
+    }
+
+    const refreshButton = document.getElementById("spaceRefreshUsersButton");
+    if (refreshButton) {
+      refreshButton.addEventListener("click", async () => {
+        const spaceId = document.getElementById("spacePollId")?.value || "";
+        if (!spaceId) return;
+        try {
+          const response = await fetch(`/x/spaces/${spaceId}/refresh-users`, {
+            method: "POST",
+            headers: { "X-Requested-With": "fetch" },
+          });
+          if (!response.ok) return;
+          const detail = await response.json();
+          renderSpaceSummary(detail);
+          if (detail.space) {
+            const rawTarget = document.getElementById("spaceDetailContent");
+            if (rawTarget) {
+              rawTarget.textContent = JSON.stringify(detail.space, null, 2);
+            }
+          }
+        } catch (error) {
+          return;
+        }
+      });
+    }
+  </script>
+
+{% endblock %}
