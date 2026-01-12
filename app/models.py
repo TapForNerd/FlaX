@@ -250,3 +250,20 @@ class XMediaUpload(db.Model):
     file_blob = db.Column(db.LargeBinary)
     created_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
     updated_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), onupdate=db.func.now())
+
+
+class XUsageSnapshot(db.Model):
+    __tablename__ = "x_usage_snapshots"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    days = db.Column(db.Integer, nullable=False, default=1)
+    hours = db.Column(db.Integer)
+    cap_reset_day = db.Column(db.Integer)
+    project_cap = db.Column(db.Integer)
+    project_id = db.Column(db.String(32))
+    project_usage = db.Column(db.Integer)
+    daily_project_usage = db.Column(JSON)
+    daily_client_app_usage = db.Column(JSON)
+    raw_usage_data = db.Column(JSON)
+    created_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)

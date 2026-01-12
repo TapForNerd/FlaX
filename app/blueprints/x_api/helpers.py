@@ -8,7 +8,7 @@ import requests
 from PIL import Image
 
 from app.extensions import db
-from app.models import ApiRequestLog, AnnotationDomain, AnnotationEntity, PostContextAnnotation, User, XMediaUpload, XNewsStorySnapshot, XPost, XSpace, XSpaceSnapshot, XTrendSnapshot, XUser
+from app.models import ApiRequestLog, AnnotationDomain, AnnotationEntity, PostContextAnnotation, User, XMediaUpload, XNewsStorySnapshot, XPost, XSpace, XSpaceSnapshot, XTrendSnapshot, XUsageSnapshot, XUser
 from flask import session
 
 from app.blueprints.auth.token_helpers import call_x_api_with_refresh, get_current_user_token
@@ -128,6 +128,15 @@ NEWS_FIELDS = [
     "name",
     "summary",
     "updated_at",
+]
+
+USAGE_FIELDS = [
+    "cap_reset_day",
+    "daily_client_app_usage",
+    "daily_project_usage",
+    "project_cap",
+    "project_id",
+    "project_usage",
 ]
 
 TWEET_EXPANSIONS = [
@@ -1779,6 +1788,38 @@ def get_x_personalized_trends() -> Any:
     return response
 
 
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _store_usage_snapshot(
+    usage: Mapping[str, Any],
+    days: int,
+    hours: int | None = None,
+    user_id: int | None = None,
+) -> None:
+    if user_id is None:
+        user_id = session.get("user_id")
+    if not user_id:
+        return
+    snapshot = XUsageSnapshot(
+        user_id=user_id,
+        days=days,
+        hours=hours,
+        cap_reset_day=usage.get("cap_reset_day"),
+        project_cap=_safe_int(usage.get("project_cap")),
+        project_id=str(usage.get("project_id")) if usage.get("project_id") else None,
+        project_usage=_safe_int(usage.get("project_usage")),
+        daily_project_usage=usage.get("daily_project_usage"),
+        daily_client_app_usage=usage.get("daily_client_app_usage"),
+        raw_usage_data=usage,
+    )
+    db.session.add(snapshot)
+
+
 def get_x_news_by_id(news_id: str) -> Any:
     token = get_app_var("X_BEARER_TOKEN")
     if not token:
@@ -1806,6 +1847,42 @@ def get_x_news_by_id(news_id: str) -> Any:
         return response
 
     _store_news_snapshots([payload["data"]], "id")
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_usage_tweets(days: int = 1, hours: int | None = None) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    response = requests.get(
+        "https://api.x.com/2/usage/tweets",
+        headers={"Authorization": f"Bearer {token}"},
+        params={
+            "days": days,
+            "usage.fields": ",".join(_filter_fields(USAGE_FIELDS)),
+        },
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_usage_snapshot(payload.get("data", {}), days=days, hours=hours)
     db.session.commit()
 
     print(json.dumps(payload, indent=4))

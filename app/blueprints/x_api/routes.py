@@ -23,6 +23,7 @@ from app.blueprints.x_api.helpers import (
     TWEET_EXPANSIONS,
     TWEET_FIELDS,
     TREND_FIELDS,
+    USAGE_FIELDS,
     USER_FIELDS,
     _filter_fields,
     _process_image_bytes,
@@ -62,6 +63,7 @@ from app.blueprints.x_api.helpers import (
     append_x_media_upload,
     finalize_x_media_upload,
     upload_x_media_one_shot,
+    get_x_usage_tweets,
     search_x_news,
     like_x_post,
     mute_x_user,
@@ -77,8 +79,9 @@ from app.blueprints.x_api.helpers import (
     update_x_list,
 )
 from app.extensions import db
-from app.models import ApiRequestLog, UserOAuthToken, XMediaUpload, XNewsStorySnapshot, XPost, XSpace, XTrendSnapshot, XUser
+from app.models import ApiRequestLog, UserOAuthToken, XMediaUpload, XNewsStorySnapshot, XPost, XSpace, XTrendSnapshot, XUsageSnapshot, XUser
 from app.models import UserLinkedAccount
+from sqlalchemy import String, or_, cast
 
 bp = Blueprint("x_api", __name__, url_prefix="/x")
 bp.cli.add_command(x_api_cli)
@@ -1434,6 +1437,210 @@ def media():
         recent_uploads=recent_uploads,
         image_format_options=sorted(set(value[0].lower() for value in IMAGE_FORMATS.values())),
     )
+
+
+@bp.route("/usage", methods=["GET", "POST"])
+@login_required
+def usage():
+    time_value = ""
+    time_unit = "hours"
+    days = ""
+    result = None
+    error = session.get("x_usage_lookup_error")
+    known_limit = session.get("x_usage_known_limit")
+    curl_preview = session.get("x_usage_lookup_curl")
+    log_id = session.get("x_usage_lookup_log_id")
+    keep_result = session.pop("x_usage_keep_result", False)
+    if request.method == "GET" and not keep_result:
+        session.pop("x_usage_lookup_log_id", None)
+        session.pop("x_usage_lookup_error", None)
+        session.pop("x_usage_known_limit", None)
+        session.pop("x_usage_lookup_curl", None)
+    if log_id:
+        log = ApiRequestLog.query.get(log_id)
+        if log and log.response_body:
+            body = log.response_body
+            try:
+                result = json.loads(body)
+            except json.JSONDecodeError:
+                result = None
+                if body.startswith('"') and body.endswith('"'):
+                    try:
+                        unescaped = json.loads(body)
+                        if isinstance(unescaped, str) and unescaped.lstrip().startswith(("{", "[")):
+                            result = json.loads(unescaped)
+                    except json.JSONDecodeError:
+                        result = None
+                if result is None:
+                    result = {"raw": body}
+        if isinstance(result, dict) and isinstance(result.get("raw"), str):
+            raw_payload = result["raw"].lstrip()
+            if raw_payload.startswith(("{", "[")):
+                try:
+                    result = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    pass
+
+    snapshots = (
+        XUsageSnapshot.query.filter_by(user_id=session.get("user_id"))
+        .order_by(XUsageSnapshot.created_at.desc())
+        .limit(50)
+        .all()
+    )
+
+    if request.method == "POST":
+        known_limit = None
+        time_value = request.form.get("time_value", "").strip()
+        time_unit = request.form.get("time_unit", "hours").strip() or "hours"
+        days = request.form.get("days", "").strip()
+        curl_preview = None
+
+        def parse_int(raw_value: str, default: int) -> int:
+            try:
+                return int(raw_value) if raw_value else default
+            except ValueError:
+                return default
+
+        def clamp(value: int, min_value: int, max_value: int) -> int:
+            return min(max(value, min_value), max_value)
+
+        hours_value = None
+        if time_unit == "hours":
+            hours_value = clamp(parse_int(time_value, 24), 1, 2160)
+            days_value = max(1, (hours_value + 23) // 24)
+        else:
+            days_value = clamp(parse_int(time_value or days, 1), 1, 90)
+
+        if days and time_unit != "hours":
+            days_value = clamp(parse_int(days, days_value), 1, 90)
+
+        flash("Usage lookup started.", "info")
+        response = get_x_usage_tweets(days=days_value, hours=hours_value)
+        params = {"days": days_value, "usage.fields": ",".join(_filter_fields(USAGE_FIELDS))}
+        curl_preview = f'curl -H "Authorization: Bearer <token>" "https://api.x.com/2/usage/tweets?{urlencode(params, safe=",")}"'
+
+        if response is None:
+            error = "Unable to call X API; check your credentials."
+            result = None
+            flash("Lookup failed. Check your credentials.", "danger")
+        else:
+            if isinstance(response, dict):
+                result = response
+                if response.get("error"):
+                    error = response["error"]
+                    flash(response["error"], "warning")
+                else:
+                    flash("Lookup complete.", "success")
+            else:
+                try:
+                    result = response.json()
+                except ValueError:
+                    result = {"raw": response.text}
+                if response.status_code and response.status_code >= 400:
+                    flash(f"Lookup failed with status {response.status_code}.", "danger")
+                else:
+                    flash("Lookup complete.", "success")
+
+        session["x_usage_keep_result"] = True
+        log_id = session.get("x_last_api_log_id")
+        if isinstance(response, dict) and response.get("error") and not log_id:
+            log_id = None
+        session["x_usage_lookup_log_id"] = log_id
+        session["x_usage_lookup_error"] = error
+        session["x_usage_lookup_curl"] = curl_preview
+        session["x_usage_known_limit"] = known_limit
+        return redirect(url_for("x_api.usage"))
+
+    return render_template(
+        "x_api/usage.html",
+        time_value=time_value,
+        time_unit=time_unit,
+        days=days,
+        result=result,
+        error=error,
+        known_limit=known_limit,
+        curl_preview=curl_preview,
+        snapshots=snapshots,
+    )
+
+
+@bp.route("/usage/data")
+@login_required
+def usage_data():
+    draw = request.args.get("draw", type=int, default=1)
+    start = request.args.get("start", type=int, default=0)
+    length = request.args.get("length", type=int, default=10)
+    search_value = request.args.get("search[value]", type=str, default="").strip()
+    order_column = request.args.get("order[0][column]", type=int, default=0)
+    order_dir = request.args.get("order[0][dir]", type=str, default="desc")
+
+    query = XUsageSnapshot.query.filter_by(user_id=session.get("user_id"))
+    total_count = query.count()
+
+    if search_value:
+        like_value = f"%{search_value}%"
+        query = query.filter(
+            or_(
+                cast(XUsageSnapshot.project_id, String).ilike(like_value),
+                cast(XUsageSnapshot.project_usage, String).ilike(like_value),
+                cast(XUsageSnapshot.project_cap, String).ilike(like_value),
+                cast(XUsageSnapshot.days, String).ilike(like_value),
+            )
+        )
+
+    filtered_count = query.count()
+
+    columns = [
+        XUsageSnapshot.created_at,
+        XUsageSnapshot.days,
+        XUsageSnapshot.project_usage,
+        XUsageSnapshot.project_cap,
+        XUsageSnapshot.project_id,
+    ]
+    sort_column = columns[order_column] if order_column < len(columns) else XUsageSnapshot.created_at
+    if order_dir == "asc":
+        query = query.order_by(sort_column.asc())
+    else:
+        query = query.order_by(sort_column.desc())
+
+    rows = query.offset(start).limit(length).all()
+
+    data = []
+    for row in rows:
+        data.append({
+            "created_at": row.created_at.isoformat() if row.created_at else "",
+            "days": row.days,
+            "project_usage": row.project_usage,
+            "project_cap": row.project_cap,
+            "project_id": row.project_id,
+            "id": row.id,
+        })
+
+    return jsonify({
+        "draw": draw,
+        "recordsTotal": total_count,
+        "recordsFiltered": filtered_count,
+        "data": data,
+    })
+
+
+@bp.route("/usage/<int:snapshot_id>")
+@login_required
+def usage_snapshot(snapshot_id: int):
+    snapshot = XUsageSnapshot.query.filter_by(id=snapshot_id, user_id=session.get("user_id")).first()
+    if not snapshot:
+        return jsonify({"error": "Snapshot not found."}), 404
+    return jsonify({
+        "id": snapshot.id,
+        "created_at": snapshot.created_at.isoformat() if snapshot.created_at else None,
+        "days": snapshot.days,
+        "hours": snapshot.hours,
+        "cap_reset_day": snapshot.cap_reset_day,
+        "project_cap": snapshot.project_cap,
+        "project_id": snapshot.project_id,
+        "project_usage": snapshot.project_usage,
+        "raw_usage_data": snapshot.raw_usage_data,
+    })
 
 
 @bp.route("/spaces", methods=["GET", "POST"])
