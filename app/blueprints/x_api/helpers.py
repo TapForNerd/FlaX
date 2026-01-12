@@ -6,7 +6,7 @@ from typing import Any, Mapping
 import requests
 
 from app.extensions import db
-from app.models import ApiRequestLog, AnnotationDomain, AnnotationEntity, PostContextAnnotation, User, XPost, XUser
+from app.models import ApiRequestLog, AnnotationDomain, AnnotationEntity, PostContextAnnotation, User, XPost, XSpace, XSpaceSnapshot, XUser
 from flask import session
 
 from app.blueprints.auth.token_helpers import call_x_api_with_refresh, get_current_user_token
@@ -97,6 +97,34 @@ TWEET_EXPANSIONS = [
     "author_id",
 ]
 
+SPACE_FIELDS = [
+    "created_at",
+    "creator_id",
+    "ended_at",
+    "host_ids",
+    "id",
+    "invited_user_ids",
+    "is_ticketed",
+    "lang",
+    "participant_count",
+    "scheduled_start",
+    "speaker_ids",
+    "started_at",
+    "state",
+    "subscriber_count",
+    "title",
+    "topic_ids",
+    "updated_at",
+]
+
+SPACE_EXPANSIONS = [
+    "creator_id",
+    "host_ids",
+    "invited_user_ids",
+    "speaker_ids",
+    "topic_ids",
+]
+
 
 def _filter_fields(fields: list[str]) -> list[str]:
     return [
@@ -156,6 +184,47 @@ def _upsert_x_post(payload: Mapping[str, Any]) -> XPost | None:
     record.raw_post_data = payload
     _upsert_context_annotations(record.id, payload.get("context_annotations") or [])
     return record
+
+
+def _upsert_x_space(payload: Mapping[str, Any]) -> XSpace | None:
+    space_id = payload.get("id")
+    if not space_id:
+        return None
+
+    record = db.session.get(XSpace, space_id)
+    if record is None:
+        record = XSpace(id=space_id, state=payload.get("state") or "unknown")
+        db.session.add(record)
+
+    record.state = payload.get("state", record.state)
+    record.title = payload.get("title", record.title)
+    creator_id = payload.get("creator_id")
+    try:
+        record.creator_id = int(creator_id) if creator_id else record.creator_id
+    except (TypeError, ValueError):
+        record.creator_id = record.creator_id
+    record.scheduled_start = _parse_iso8601(payload.get("scheduled_start")) or record.scheduled_start
+    record.started_at = _parse_iso8601(payload.get("started_at")) or record.started_at
+    record.ended_at = _parse_iso8601(payload.get("ended_at")) or record.ended_at
+    record.participant_count = payload.get("participant_count", record.participant_count)
+    record.subscriber_count = payload.get("subscriber_count", record.subscriber_count)
+    record.lang = payload.get("lang", record.lang)
+    record.is_ticketed = payload.get("is_ticketed", record.is_ticketed)
+    record.raw_space_data = payload
+
+    return record
+
+
+def _record_space_snapshot(space: XSpace, payload: Mapping[str, Any], source: str) -> None:
+    snapshot = XSpaceSnapshot(
+        space_id=space.id,
+        source=source,
+        state=payload.get("state"),
+        participant_count=payload.get("participant_count"),
+        subscriber_count=payload.get("subscriber_count"),
+        raw_space_data=payload,
+    )
+    db.session.add(snapshot)
 
 
 def _upsert_context_annotations(post_id: int, annotations: list[Mapping[str, Any]]) -> None:
@@ -597,6 +666,61 @@ def get_x_users_by_ids(user_ids: list[str] | str) -> Any:
     return response
 
 
+def get_x_users_by_ids_with_app_token(user_ids: list[str] | str) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        print("Missing X_BEARER_TOKEN; update .env or app_vars before calling.")
+        return {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+
+    if isinstance(user_ids, str):
+        user_ids = [item.strip() for item in user_ids.split(",")]
+    cleaned = [item.strip() for item in user_ids if item and item.strip()]
+    if not cleaned:
+        print("Provide at least one user id.")
+        return None
+    if len(cleaned) > 100:
+        cleaned = cleaned[:100]
+
+    params = {
+        "ids": ",".join(cleaned),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        "expansions": ",".join(_filter_fields(EXPANSIONS)),
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+    }
+
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.get(
+        "https://api.x.com/2/users",
+        headers=headers,
+        params=params,
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    for user in payload.get("data", []) or []:
+        _upsert_x_user(user)
+
+    includes = payload.get("includes", {})
+    for post in includes.get("tweets", []) or []:
+        _upsert_x_post(post)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
 def get_x_users_search(query: str, max_results: int = 100, next_token: str | None = None) -> Any:
     response = call_x_api_with_refresh(
         requests.get,
@@ -646,6 +770,199 @@ def get_x_users_search(query: str, max_results: int = 100, next_token: str | Non
     db.session.commit()
 
     print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_spaces_by_ids(space_ids: list[str] | str) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        print("Missing X_BEARER_TOKEN; update .env or app_vars before calling.")
+        return {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+
+    if isinstance(space_ids, str):
+        space_ids = [item.strip() for item in space_ids.split(",")]
+    cleaned = [space_id.strip() for space_id in space_ids if space_id and space_id.strip()]
+    if not cleaned:
+        print("Provide at least one Space ID.")
+        return None
+    if len(cleaned) > 100:
+        cleaned = cleaned[:100]
+
+    params = {
+        "ids": ",".join(cleaned),
+        "space.fields": ",".join(_filter_fields(SPACE_FIELDS)),
+        "expansions": ",".join(SPACE_EXPANSIONS),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+    }
+
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.get(
+        "https://api.x.com/2/spaces",
+        headers=headers,
+        params=params,
+        timeout=10,
+    )
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if payload and payload.get("data"):
+        for space_payload in payload.get("data", []) or []:
+            space = _upsert_x_space(space_payload)
+            if space:
+                _record_space_snapshot(space, space_payload, "spaces_by_ids")
+        includes = payload.get("includes", {})
+        for user in includes.get("users", []) or []:
+            _upsert_x_user(user)
+        db.session.commit()
+    return response
+
+
+def get_x_spaces_by_creator_ids(user_ids: list[str] | str) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        print("Missing X_BEARER_TOKEN; update .env or app_vars before calling.")
+        return {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+
+    if isinstance(user_ids, str):
+        user_ids = [item.strip() for item in user_ids.split(",")]
+    cleaned = [user_id.strip() for user_id in user_ids if user_id and user_id.strip()]
+    if not cleaned:
+        print("Provide at least one user id.")
+        return None
+    if len(cleaned) > 100:
+        cleaned = cleaned[:100]
+
+    params = {
+        "user_ids": ",".join(cleaned),
+        "space.fields": ",".join(_filter_fields(SPACE_FIELDS)),
+        "expansions": ",".join(SPACE_EXPANSIONS),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+    }
+
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.get(
+        "https://api.x.com/2/spaces/by/creator_ids",
+        headers=headers,
+        params=params,
+        timeout=10,
+    )
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if payload and payload.get("data"):
+        for space_payload in payload.get("data", []) or []:
+            space = _upsert_x_space(space_payload)
+            if space:
+                _record_space_snapshot(space, space_payload, "spaces_by_creator_ids")
+        includes = payload.get("includes", {})
+        for user in includes.get("users", []) or []:
+            _upsert_x_user(user)
+        db.session.commit()
+    return response
+
+
+def get_x_spaces_search(query: str, state: str = "all", max_results: int = 100, next_token: str | None = None) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        print("Missing X_BEARER_TOKEN; update .env or app_vars before calling.")
+        return {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+
+    if not query:
+        print("Provide a search query.")
+        return None
+
+    params = {
+        "query": query,
+        "state": state or "all",
+        "max_results": max_results,
+        "space.fields": ",".join(_filter_fields(SPACE_FIELDS)),
+        "expansions": ",".join(SPACE_EXPANSIONS),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+    }
+    if next_token:
+        params["next_token"] = next_token
+
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.get(
+        "https://api.x.com/2/spaces/search",
+        headers=headers,
+        params=params,
+        timeout=10,
+    )
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if payload and payload.get("data"):
+        for space_payload in payload.get("data", []) or []:
+            space = _upsert_x_space(space_payload)
+            if space:
+                _record_space_snapshot(space, space_payload, "spaces_search")
+        includes = payload.get("includes", {})
+        for user in includes.get("users", []) or []:
+            _upsert_x_user(user)
+        db.session.commit()
+    return response
+
+
+def get_x_space_posts(space_id: str, max_results: int = 100) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        print("Missing X_BEARER_TOKEN; update .env or app_vars before calling.")
+        return {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+
+    cleaned = str(space_id).strip()
+    if not cleaned:
+        print("Provide a Space ID.")
+        return None
+
+    params = {
+        "max_results": max_results,
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+    }
+
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.get(
+        f"https://api.x.com/2/spaces/{cleaned}/tweets",
+        headers=headers,
+        params=params,
+        timeout=10,
+    )
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if payload and payload.get("data"):
+        for post in payload.get("data", []) or []:
+            _upsert_x_post(post)
+        includes = payload.get("includes", {})
+        for user in includes.get("users", []) or []:
+            _upsert_x_user(user)
+        db.session.commit()
     return response
 
 

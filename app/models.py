@@ -128,6 +128,45 @@ class XPost(db.Model):
     author = db.relationship("XUser", backref="posts", foreign_keys=[author_id])
 
 
+class XSpace(db.Model):
+    __tablename__ = "x_spaces"
+
+    id = db.Column(db.String(20), primary_key=True)
+    state = db.Column(db.String(20), nullable=False, index=True)
+    title = db.Column(db.String(500))
+    creator_id = db.Column(db.BigInteger, db.ForeignKey("x_users.id"), nullable=True, index=True)
+    scheduled_start = db.Column(db.DateTime(timezone=True))
+    started_at = db.Column(db.DateTime(timezone=True))
+    ended_at = db.Column(db.DateTime(timezone=True))
+    participant_count = db.Column(db.Integer)
+    subscriber_count = db.Column(db.Integer)
+    lang = db.Column(db.String(10))
+    is_ticketed = db.Column(db.Boolean)
+    raw_space_data = db.Column(JSON, nullable=False, default=dict)
+    last_updated_at = db.Column(
+        db.DateTime(timezone=True),
+        server_default=db.func.now(),
+        onupdate=db.func.now(),
+    )
+
+    creator = db.relationship("XUser", backref="spaces", foreign_keys=[creator_id])
+
+
+class XSpaceSnapshot(db.Model):
+    __tablename__ = "x_space_snapshots"
+
+    id = db.Column(db.Integer, primary_key=True)
+    space_id = db.Column(db.String(20), db.ForeignKey("x_spaces.id"), nullable=False, index=True)
+    fetched_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+    source = db.Column(db.String(50), nullable=False)
+    state = db.Column(db.String(20))
+    participant_count = db.Column(db.Integer)
+    subscriber_count = db.Column(db.Integer)
+    raw_space_data = db.Column(JSON, nullable=False, default=dict)
+
+    space = db.relationship("XSpace", backref="snapshots")
+
+
 class AnnotationDomain(db.Model):
     __tablename__ = "annotation_domains"
 

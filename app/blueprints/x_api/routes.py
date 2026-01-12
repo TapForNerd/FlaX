@@ -2,7 +2,7 @@ from urllib.parse import urlencode
 
 import json
 
-from flask import Blueprint, current_app, flash, redirect, render_template, request, session, url_for
+from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, session, url_for
 import requests
 
 from app.blueprints.auth.decorators import login_required
@@ -12,6 +12,8 @@ from app.blueprints.x_api.helpers import (
     EXPANSIONS,
     LIST_EXPANSIONS,
     LIST_FIELDS,
+    SPACE_EXPANSIONS,
+    SPACE_FIELDS,
     TWEET_EXPANSIONS,
     TWEET_FIELDS,
     USER_FIELDS,
@@ -28,7 +30,12 @@ from app.blueprints.x_api.helpers import (
     get_x_list_tweets,
     get_x_liked_posts,
     get_x_liking_users,
+    get_x_spaces_by_creator_ids,
+    get_x_spaces_by_ids,
+    get_x_space_posts,
+    get_x_spaces_search,
     get_x_muted_users,
+    get_x_users_by_ids_with_app_token,
     get_x_user_by_id,
     get_x_user_followed_lists,
     get_x_user_list_memberships,
@@ -50,7 +57,7 @@ from app.blueprints.x_api.helpers import (
     unpin_x_list,
     update_x_list,
 )
-from app.models import ApiRequestLog, UserOAuthToken, XPost, XUser
+from app.models import ApiRequestLog, UserOAuthToken, XPost, XSpace, XUser
 from app.models import UserLinkedAccount
 
 bp = Blueprint("x_api", __name__, url_prefix="/x")
@@ -552,6 +559,421 @@ def likes():
         existing_users=XUser.query.order_by(XUser.username.asc()).limit(200).all(),
         existing_posts=XPost.query.order_by(XPost.created_at.desc()).limit(200).all(),
     )
+
+
+@bp.route("/spaces", methods=["GET", "POST"])
+@login_required
+def spaces():
+    space_search_query = ""
+    space_search_state = ""
+    space_search_max_results = ""
+    space_search_next_token = ""
+    space_ids = ""
+    space_posts_id = ""
+    space_posts_max_results = ""
+    space_poll_id = ""
+    creator_identifier = ""
+    creator_user_select = ""
+    result = None
+    error = session.get("x_spaces_lookup_error")
+    curl_preview = session.get("x_spaces_lookup_curl")
+    log_id = session.get("x_spaces_lookup_log_id")
+
+    def load_logged_result() -> dict | None:
+        if not log_id:
+            return None
+        log = ApiRequestLog.query.get(log_id)
+        if not log or not log.response_body:
+            return None
+        body = log.response_body
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError:
+            parsed = None
+            if body.startswith('"') and body.endswith('"'):
+                try:
+                    unescaped = json.loads(body)
+                    if isinstance(unescaped, str) and unescaped.lstrip().startswith(("{", "[")):
+                        parsed = json.loads(unescaped)
+                except json.JSONDecodeError:
+                    parsed = None
+            if parsed is None:
+                parsed = {"raw": body}
+        if isinstance(parsed, dict) and isinstance(parsed.get("raw"), str):
+            raw_payload = parsed["raw"].lstrip()
+            if raw_payload.startswith(("{", "[")):
+                try:
+                    parsed = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    pass
+        return parsed
+
+    if log_id:
+        result = load_logged_result()
+
+    existing_users = XUser.query.order_by(XUser.username.asc()).limit(200).all()
+    known_users_by_id = {str(user.id): user for user in existing_users}
+
+    if request.method == "POST":
+        space_search_query = request.form.get("space_search_query", "").strip()
+        space_search_state = request.form.get("space_search_state", "").strip()
+        space_search_max_results = request.form.get("space_search_max_results", "").strip()
+        space_search_next_token = request.form.get("space_search_next_token", "").strip()
+        space_ids = request.form.get("space_ids", "").strip()
+        space_posts_id = request.form.get("space_posts_id", "").strip()
+        space_posts_max_results = request.form.get("space_posts_max_results", "").strip()
+        space_poll_id = request.form.get("space_poll_id", "").strip()
+        creator_identifier = request.form.get("creator_identifier", "").strip()
+        creator_user_select = request.form.get("creator_user_select", "").strip()
+        curl_preview = None
+
+        def build_curl(url: str, params_dict: dict | None = None) -> str:
+            if not params_dict:
+                return f'curl -H "Authorization: Bearer <token>" "{url}"'
+            query = urlencode(params_dict, safe=",")
+            return f'curl -H "Authorization: Bearer <token>" "{url}?{query}"'
+
+        action = request.form.get("spaces_action")
+        response = None
+        if action == "search_spaces":
+            if not space_search_query:
+                error = "Please provide a search query."
+                flash(error, "warning")
+            else:
+                try:
+                    max_results = int(space_search_max_results) if space_search_max_results else 100
+                except ValueError:
+                    max_results = 100
+                max_results = min(max(max_results, 1), 100)
+                state_value = space_search_state or "all"
+                flash("Spaces search started.", "info")
+                response = get_x_spaces_search(
+                    space_search_query,
+                    state=state_value,
+                    max_results=max_results,
+                    next_token=space_search_next_token or None,
+                )
+                params = {
+                    "query": "<QUERY>",
+                    "state": state_value,
+                    "max_results": max_results,
+                    "space.fields": ",".join(_filter_fields(SPACE_FIELDS)),
+                    "expansions": ",".join(SPACE_EXPANSIONS),
+                    "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+                }
+                if space_search_next_token:
+                    params["next_token"] = "<NEXT_TOKEN>"
+                curl_preview = build_curl("https://api.x.com/2/spaces/search", params)
+        elif action == "lookup_spaces":
+            cleaned = [item.strip() for item in space_ids.split(",") if item.strip()]
+            if not cleaned:
+                error = "Please provide at least one Space ID."
+                flash(error, "warning")
+            else:
+                flash("Space lookup started.", "info")
+                response = get_x_spaces_by_ids(cleaned)
+                params = {
+                    "ids": "ID1,ID2",
+                    "space.fields": ",".join(_filter_fields(SPACE_FIELDS)),
+                    "expansions": ",".join(SPACE_EXPANSIONS),
+                    "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+                }
+                curl_preview = build_curl("https://api.x.com/2/spaces", params)
+        elif action == "lookup_creators":
+            if not creator_identifier:
+                creator_identifier = creator_user_select
+            identifiers = [item.strip() for item in (creator_identifier or "").split(",") if item.strip()]
+            resolved_ids = []
+            resolve_errors = []
+            for identifier in identifiers:
+                resolved_id, resolve_error = resolve_x_user_id(identifier)
+                if resolve_error:
+                    resolve_errors.append(resolve_error)
+                elif resolved_id:
+                    resolved_ids.append(resolved_id)
+            if not identifiers:
+                error = "Please provide at least one creator ID or username."
+                flash(error, "warning")
+            elif resolve_errors:
+                response = None
+                error = resolve_errors[0]
+                flash(resolve_errors[0], "warning")
+            else:
+                flash("Creator lookup started.", "info")
+                response = get_x_spaces_by_creator_ids(resolved_ids)
+                params = {
+                    "user_ids": "USER_ID1,USER_ID2",
+                    "space.fields": ",".join(_filter_fields(SPACE_FIELDS)),
+                    "expansions": ",".join(SPACE_EXPANSIONS),
+                    "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+                }
+                curl_preview = build_curl("https://api.x.com/2/spaces/by/creator_ids", params)
+        elif action == "space_posts":
+            if not space_posts_id:
+                error = "Please provide a Space ID to fetch posts."
+                flash(error, "warning")
+            else:
+                try:
+                    max_results = int(space_posts_max_results) if space_posts_max_results else 100
+                except ValueError:
+                    max_results = 100
+                max_results = min(max(max_results, 1), 100)
+                flash("Space posts lookup started.", "info")
+                response = get_x_space_posts(space_posts_id, max_results=max_results)
+                params = {
+                    "max_results": max_results,
+                    "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+                    "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+                    "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+                }
+                curl_preview = build_curl("https://api.x.com/2/spaces/<SPACE_ID>/tweets", params)
+        elif action == "poll_space":
+            if not space_poll_id:
+                error = "Please provide a Space ID to poll."
+                flash(error, "warning")
+            else:
+                flash("Space poll started.", "info")
+                response = get_x_spaces_by_ids([space_poll_id])
+                params = {
+                    "ids": "SPACE_ID",
+                    "space.fields": ",".join(_filter_fields(SPACE_FIELDS)),
+                    "expansions": ",".join(SPACE_EXPANSIONS),
+                    "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+                }
+                curl_preview = build_curl("https://api.x.com/2/spaces", params)
+        else:
+            error = "Please select a Spaces action to run."
+            flash("Please select an action first.", "warning")
+
+        if response is None and error is None:
+            error = "Unable to call X API; check your credentials."
+            result = None
+            flash("Lookup failed. Check your credentials.", "danger")
+        elif response is not None:
+            def extract_problem(payload: dict) -> dict | None:
+                if not isinstance(payload, dict):
+                    return None
+                if payload.get("type") or payload.get("title"):
+                    return payload
+                errors = payload.get("errors")
+                if isinstance(errors, list) and errors:
+                    return errors[0]
+                return None
+
+            if isinstance(response, dict):
+                result = response
+                problem = extract_problem(result)
+                if problem and (problem.get("type") == "https://api.twitter.com/2/problems/client-forbidden" or problem.get("title") == "Client Forbidden"):
+                    error = (
+                        "Client Forbidden: ensure your developer App is attached to a Project "
+                        "with access to Spaces endpoints."
+                    )
+                    flash(error, "warning")
+                elif problem and problem.get("title"):
+                    error = problem.get("title")
+                    flash(problem.get("title"), "warning")
+                elif response.get("error"):
+                    error = response.get("error")
+                    flash(response["error"], "warning")
+                else:
+                    flash("Lookup complete.", "success")
+            else:
+                try:
+                    result = response.json()
+                except ValueError:
+                    result = {"raw": response.text}
+                problem = extract_problem(result)
+                if problem and (problem.get("type") == "https://api.twitter.com/2/problems/client-forbidden" or problem.get("title") == "Client Forbidden"):
+                    error = (
+                        "Client Forbidden: ensure your developer App is attached to a Project "
+                        "with access to Spaces endpoints."
+                    )
+                    flash(error, "warning")
+                elif problem and problem.get("title"):
+                    error = problem.get("title")
+                    flash(problem.get("title"), "warning")
+                if response.status_code and response.status_code >= 400:
+                    flash(f"Lookup failed with status {response.status_code}.", "danger")
+                elif error is None:
+                    flash("Lookup complete.", "success")
+
+        if action == "poll_space" and request.headers.get("X-Requested-With") == "fetch":
+            detail = _build_space_detail(space_poll_id)
+            if detail:
+                return jsonify(detail)
+            return jsonify({"error": "Space not found."}), 404
+
+        session["x_spaces_lookup_log_id"] = session.get("x_last_api_log_id")
+        session["x_spaces_lookup_error"] = error
+        session["x_spaces_lookup_curl"] = curl_preview
+        return redirect(url_for("x_api.spaces"))
+
+    if isinstance(result, dict) and result.get("meta", {}).get("next_token") and not space_search_next_token:
+        space_search_next_token = result["meta"]["next_token"]
+
+    upcoming_spaces = (
+        XSpace.query.filter(XSpace.state != "ended")
+        .order_by(XSpace.scheduled_start.desc(), XSpace.started_at.desc())
+        .limit(200)
+        .all()
+    )
+    ended_spaces = (
+        XSpace.query.filter(XSpace.state == "ended")
+        .order_by(XSpace.ended_at.desc())
+        .limit(200)
+        .all()
+    )
+
+    def serialize_space(space: XSpace) -> dict:
+        snapshots = []
+        for snapshot in sorted(space.snapshots, key=lambda item: item.fetched_at or 0):
+            snapshots.append(
+                {
+                    "fetched_at": snapshot.fetched_at.isoformat() if snapshot.fetched_at else None,
+                    "participant_count": snapshot.participant_count,
+                }
+            )
+        return {
+            "id": space.id,
+            "title": space.title,
+            "state": space.state,
+            "scheduled_start": space.scheduled_start,
+            "started_at": space.started_at,
+            "ended_at": space.ended_at,
+            "creator_id": str(space.creator_id) if space.creator_id is not None else None,
+            "participant_count": space.participant_count,
+            "creator_user": space.creator,
+            "raw_space_data": space.raw_space_data,
+            "snapshots": snapshots,
+        }
+
+    upcoming_spaces_payload = [serialize_space(space) for space in upcoming_spaces]
+    ended_spaces_payload = [serialize_space(space) for space in ended_spaces]
+
+    space_snapshots_by_id = {}
+    if isinstance(result, dict) and isinstance(result.get("data"), list):
+        creator_ids = []
+        space_ids = []
+        for item in result["data"]:
+            if not isinstance(item, dict):
+                continue
+            creator_id = item.get("creator_id")
+            try:
+                if creator_id:
+                    creator_ids.append(int(creator_id))
+            except (TypeError, ValueError):
+                continue
+            space_id = item.get("id")
+            if space_id:
+                space_ids.append(str(space_id))
+        if creator_ids:
+            for user in XUser.query.filter(XUser.id.in_(creator_ids)).all():
+                known_users_by_id[str(user.id)] = user
+        if space_ids:
+            for space in XSpace.query.filter(XSpace.id.in_(space_ids)).all():
+                space_snapshots_by_id[space.id] = [
+                    {
+                        "fetched_at": snapshot.fetched_at.isoformat() if snapshot.fetched_at else None,
+                        "participant_count": snapshot.participant_count,
+                    }
+                    for snapshot in sorted(space.snapshots, key=lambda item: item.fetched_at or 0)
+                ]
+
+    return render_template(
+        "x_api/spaces.html",
+        space_search_query=space_search_query,
+        space_search_state=space_search_state,
+        space_search_max_results=space_search_max_results,
+        space_search_next_token=space_search_next_token,
+        space_ids=space_ids,
+        space_posts_id=space_posts_id,
+        space_posts_max_results=space_posts_max_results,
+        space_poll_id=space_poll_id,
+        creator_identifier=creator_identifier,
+        creator_user_select=creator_user_select,
+        result=result,
+        error=error,
+        curl_preview=curl_preview,
+        known_users_by_id=known_users_by_id,
+        existing_users=existing_users,
+        upcoming_spaces=upcoming_spaces_payload,
+        ended_spaces=ended_spaces_payload,
+        space_snapshots_by_id=space_snapshots_by_id,
+    )
+
+
+def _build_space_detail(space_id: str) -> dict | None:
+    space = XSpace.query.filter_by(id=space_id).first()
+    if not space:
+        return None
+    raw = space.raw_space_data or {}
+    snapshots = [
+        {
+            "fetched_at": snapshot.fetched_at.isoformat() if snapshot.fetched_at else None,
+            "participant_count": snapshot.participant_count,
+        }
+        for snapshot in sorted(space.snapshots, key=lambda item: item.fetched_at or 0)
+    ]
+    ids = set()
+    for key in ("creator_id",):
+        if raw.get(key):
+            ids.add(str(raw[key]))
+    for key in ("host_ids", "speaker_ids", "invited_user_ids"):
+        for value in raw.get(key, []) or []:
+            if value:
+                ids.add(str(value))
+    users = {}
+    if ids:
+        numeric_ids = []
+        for value in ids:
+            try:
+                numeric_ids.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        for user in XUser.query.filter(XUser.id.in_(numeric_ids)).all():
+            users[str(user.id)] = {
+                "id": str(user.id),
+                "username": user.username,
+                "name": user.name,
+                "profile_image_url": user.profile_image_url,
+            }
+    return {
+        "space_id": space.id,
+        "space": raw,
+        "snapshots": snapshots,
+        "users": users,
+    }
+
+
+@bp.route("/spaces/<space_id>/detail", methods=["GET"])
+@login_required
+def space_detail(space_id: str):
+    detail = _build_space_detail(space_id)
+    if not detail:
+        return jsonify({"error": "Space not found."}), 404
+    return jsonify(detail)
+
+
+@bp.route("/spaces/<space_id>/refresh-users", methods=["POST"])
+@login_required
+def space_refresh_users(space_id: str):
+    space = XSpace.query.filter_by(id=space_id).first()
+    if not space:
+        return jsonify({"error": "Space not found."}), 404
+    raw = space.raw_space_data or {}
+    ids = set()
+    if raw.get("creator_id"):
+        ids.add(str(raw["creator_id"]))
+    for key in ("host_ids", "speaker_ids", "invited_user_ids"):
+        for value in raw.get(key, []) or []:
+            if value:
+                ids.add(str(value))
+    if ids:
+        get_x_users_by_ids_with_app_token(list(ids))
+    detail = _build_space_detail(space_id)
+    if not detail:
+        return jsonify({"error": "Space not found."}), 404
+    return jsonify(detail)
 
 
 @bp.route("/lists", methods=["GET", "POST"])
