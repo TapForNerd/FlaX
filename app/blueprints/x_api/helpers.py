@@ -6,7 +6,7 @@ from typing import Any, Mapping
 import requests
 
 from app.extensions import db
-from app.models import ApiRequestLog, AnnotationDomain, AnnotationEntity, PostContextAnnotation, User, XPost, XSpace, XSpaceSnapshot, XUser
+from app.models import ApiRequestLog, AnnotationDomain, AnnotationEntity, PostContextAnnotation, User, XPost, XSpace, XSpaceSnapshot, XTrendSnapshot, XUser
 from flask import session
 
 from app.blueprints.auth.token_helpers import call_x_api_with_refresh, get_current_user_token
@@ -101,6 +101,18 @@ COMMUNITY_FIELDS = [
     "join_policy",
     "member_count",
     "name",
+]
+
+TREND_FIELDS = [
+    "trend_name",
+    "tweet_count",
+]
+
+PERSONALIZED_TREND_FIELDS = [
+    "category",
+    "post_count",
+    "trend_name",
+    "trending_since",
 ]
 
 TWEET_EXPANSIONS = [
@@ -235,6 +247,28 @@ def _record_space_snapshot(space: XSpace, payload: Mapping[str, Any], source: st
         raw_space_data=payload,
     )
     db.session.add(snapshot)
+
+
+def _store_trend_snapshots(
+    trends: list[Mapping[str, Any]],
+    source: str,
+    woeid: int | None = None,
+) -> None:
+    for trend in trends:
+        trend_name = trend.get("trend_name")
+        if not trend_name:
+            continue
+        snapshot = XTrendSnapshot(
+            woeid=woeid,
+            source=source,
+            trend_name=str(trend_name),
+            tweet_count=trend.get("tweet_count"),
+            post_count=trend.get("post_count"),
+            category=trend.get("category"),
+            trending_since=trend.get("trending_since"),
+            raw_trend_data=trend,
+        )
+        db.session.add(snapshot)
 
 
 def _upsert_context_annotations(post_id: int, annotations: list[Mapping[str, Any]]) -> None:
@@ -433,8 +467,9 @@ def print_x_key(payload: Mapping[str, Any], key: str) -> Any:
 def get_x_user_by_username(username: str) -> Any:
     token = get_app_var("X_BEARER_TOKEN")
     if not token:
-        print("Missing X_BEARER_TOKEN; update .env or app_vars before calling.")
-        return None
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
 
     url = f"https://api.x.com/2/users/by/username/{username}"
     params = {
@@ -1403,6 +1438,83 @@ def search_x_communities(
         db.session.commit()
         return response
 
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_trends_by_woeid(woeid: int, max_trends: int = 20) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        print("Missing X_BEARER_TOKEN; update .env or app_vars before calling.")
+        return None
+
+    response = requests.get(
+        f"https://api.x.com/2/trends/by/woeid/{woeid}",
+        headers={"Authorization": f"Bearer {token}"},
+        params={
+            "max_trends": max_trends,
+            "trend.fields": ",".join(_filter_fields(TREND_FIELDS)),
+        },
+        timeout=10,
+    )
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_trend_snapshots(payload.get("data", []) or [], "woeid", woeid=woeid)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_personalized_trends() -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        "https://api.x.com/2/users/personalized_trends",
+        params={
+            "personalized_trend.fields": ",".join(_filter_fields(PERSONALIZED_TREND_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            "https://api.x.com/2/users/personalized_trends",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_trend_snapshots(payload.get("data", []) or [], "personalized", woeid=None)
     db.session.commit()
 
     print(json.dumps(payload, indent=4))

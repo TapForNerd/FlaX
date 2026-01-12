@@ -193,3 +193,18 @@ class PostContextAnnotation(db.Model):
     post = db.relationship("XPost", backref="context_annotations")
     domain = db.relationship("AnnotationDomain")
     entity = db.relationship("AnnotationEntity")
+
+
+class XTrendSnapshot(db.Model):
+    __tablename__ = "x_trend_snapshots"
+
+    id = db.Column(db.Integer, primary_key=True)
+    woeid = db.Column(db.Integer, index=True)
+    source = db.Column(db.String(30), nullable=False, index=True)
+    trend_name = db.Column(db.String(255), nullable=False, index=True)
+    tweet_count = db.Column(db.Integer)
+    post_count = db.Column(db.Integer)
+    category = db.Column(db.String(120))
+    trending_since = db.Column(db.String(80))
+    raw_trend_data = db.Column(JSON, nullable=False, default=dict)
+    fetched_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)

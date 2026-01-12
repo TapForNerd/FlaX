@@ -13,10 +13,12 @@ from app.blueprints.x_api.helpers import (
     COMMUNITY_FIELDS,
     LIST_EXPANSIONS,
     LIST_FIELDS,
+    PERSONALIZED_TREND_FIELDS,
     SPACE_EXPANSIONS,
     SPACE_FIELDS,
     TWEET_EXPANSIONS,
     TWEET_FIELDS,
+    TREND_FIELDS,
     USER_FIELDS,
     _filter_fields,
     add_x_list_member,
@@ -47,6 +49,8 @@ from app.blueprints.x_api.helpers import (
     get_x_users_by_ids,
     get_x_users_search,
     get_x_users_by_usernames,
+    get_x_personalized_trends,
+    get_x_trends_by_woeid,
     like_x_post,
     mute_x_user,
     pin_x_list,
@@ -60,7 +64,7 @@ from app.blueprints.x_api.helpers import (
     unpin_x_list,
     update_x_list,
 )
-from app.models import ApiRequestLog, UserOAuthToken, XPost, XSpace, XUser
+from app.models import ApiRequestLog, UserOAuthToken, XPost, XSpace, XTrendSnapshot, XUser
 from app.models import UserLinkedAccount
 
 bp = Blueprint("x_api", __name__, url_prefix="/x")
@@ -731,6 +735,204 @@ def communities():
         error=error,
         known_limit=known_limit,
         curl_preview=curl_preview,
+    )
+
+
+@bp.route("/trends", methods=["GET", "POST"])
+@login_required
+def trends():
+    woeid_input = ""
+    woeid_select = ""
+    max_trends = ""
+    result = None
+    keep_result = session.pop("x_trends_keep_result", False)
+    if request.method == "GET" and not keep_result:
+        session.pop("x_trends_lookup_log_id", None)
+        session.pop("x_trends_lookup_error", None)
+        session.pop("x_trends_known_limit", None)
+        session.pop("x_trends_lookup_curl", None)
+    error = session.get("x_trends_lookup_error")
+    known_limit = session.get("x_trends_known_limit")
+    curl_preview = session.get("x_trends_lookup_curl")
+    log_id = session.get("x_trends_lookup_log_id")
+
+    if log_id:
+        log = ApiRequestLog.query.get(log_id)
+        if log and log.response_body:
+            body = log.response_body
+            try:
+                result = json.loads(body)
+            except json.JSONDecodeError:
+                result = None
+                if body.startswith('"') and body.endswith('"'):
+                    try:
+                        unescaped = json.loads(body)
+                        if isinstance(unescaped, str) and unescaped.lstrip().startswith(("{", "[")):
+                            result = json.loads(unescaped)
+                    except json.JSONDecodeError:
+                        result = None
+                if result is None:
+                    result = {"raw": body}
+        if isinstance(result, dict) and isinstance(result.get("raw"), str):
+            raw_payload = result["raw"].lstrip()
+            if raw_payload.startswith(("{", "[")):
+                try:
+                    result = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    pass
+
+    existing_woeids = (
+        XTrendSnapshot.query.with_entities(XTrendSnapshot.woeid)
+        .filter(XTrendSnapshot.woeid.isnot(None))
+        .distinct()
+        .order_by(XTrendSnapshot.woeid.asc())
+        .limit(200)
+        .all()
+    )
+    known_woeids = [row.woeid for row in existing_woeids if row.woeid is not None]
+    common_woeids = [
+        (1, "Worldwide"),
+        (23424977, "United States"),
+        (23424775, "Canada"),
+        (23424856, "United Kingdom"),
+        (23424848, "Spain"),
+        (23424829, "Germany"),
+        (23424803, "India"),
+        (23424747, "Brazil"),
+        (23424900, "Mexico"),
+        (23424868, "Australia"),
+        (23424853, "France"),
+        (23424846, "South Korea"),
+        (23424852, "Italy"),
+        (23424860, "Indonesia"),
+    ]
+
+    if request.method == "POST":
+        known_limit = None
+        woeid_input = request.form.get("woeid_input", "").strip()
+        woeid_select = request.form.get("woeid_select", "").strip()
+        max_trends = request.form.get("max_trends", "").strip()
+        curl_preview = None
+
+        def build_curl(url: str, params_dict: dict | None = None) -> str:
+            if not params_dict:
+                return f'curl -H "Authorization: Bearer <token>" "{url}"'
+            query = urlencode(params_dict, safe=",")
+            return f'curl -H "Authorization: Bearer <token>" "{url}?{query}"'
+
+        action = request.form.get("trends_action")
+        response = None
+        if action == "trends_by_woeid":
+            woeid_value = woeid_input or woeid_select
+            if not woeid_value:
+                error = "Please provide a WOEID."
+                flash(error, "warning")
+            else:
+                try:
+                    woeid = int(woeid_value)
+                except ValueError:
+                    error = "WOEID must be a number."
+                    flash(error, "warning")
+                    woeid = None
+                if woeid is not None:
+                    try:
+                        max_value = int(max_trends) if max_trends else 20
+                    except ValueError:
+                        max_value = 20
+                    max_value = min(max(max_value, 1), 50)
+                    flash("Trends lookup started.", "info")
+                    response = get_x_trends_by_woeid(woeid, max_trends=max_value)
+                    params = {
+                        "max_trends": max_value,
+                        "trend.fields": ",".join(_filter_fields(TREND_FIELDS)),
+                    }
+                    curl_preview = build_curl("https://api.x.com/2/trends/by/woeid/<WOEID>", params)
+        elif action == "personalized_trends":
+            flash("Personalized trends lookup started.", "info")
+            response = get_x_personalized_trends()
+            params = {
+                "personalized_trend.fields": ",".join(_filter_fields(PERSONALIZED_TREND_FIELDS)),
+            }
+            curl_preview = build_curl("https://api.x.com/2/users/personalized_trends", params)
+        else:
+            response = None
+            error = "Please select a trends action to run."
+            flash("Please select an action first.", "warning")
+
+        if response is None and error is None:
+            error = "Unable to call X API; check your credentials."
+            result = None
+            flash("Lookup failed. Check your credentials.", "danger")
+        elif response is not None:
+            def extract_problem(payload: dict) -> dict | None:
+                if not isinstance(payload, dict):
+                    return None
+                if payload.get("type") or payload.get("title"):
+                    return payload
+                errors = payload.get("errors")
+                if isinstance(errors, list) and errors:
+                    return errors[0]
+                return None
+
+            if isinstance(response, dict):
+                result = response
+                problem = extract_problem(result)
+                if problem and (
+                    problem.get("type") == "https://api.twitter.com/2/problems/unsupported-authentication"
+                    or problem.get("title") == "Unsupported Authentication"
+                ):
+                    known_limit = (
+                        "X returned Unsupported Authentication for this endpoint. "
+                        "Trends endpoints may require elevated or app-only access."
+                    )
+                    error = known_limit
+                    flash(known_limit, "warning")
+                if response.get("error"):
+                    flash(response["error"], "warning")
+                else:
+                    flash("Lookup complete.", "success")
+            else:
+                try:
+                    result = response.json()
+                except ValueError:
+                    result = {"raw": response.text}
+                problem = extract_problem(result)
+                if problem and (
+                    problem.get("type") == "https://api.twitter.com/2/problems/unsupported-authentication"
+                    or problem.get("title") == "Unsupported Authentication"
+                ):
+                    known_limit = (
+                        "X returned Unsupported Authentication for this endpoint. "
+                        "Trends endpoints may require elevated or app-only access."
+                    )
+                    error = known_limit
+                    flash(known_limit, "warning")
+                if response.status_code and response.status_code >= 400:
+                    flash(f"Lookup failed with status {response.status_code}.", "danger")
+                else:
+                    flash("Lookup complete.", "success")
+
+        session["x_trends_keep_result"] = True
+        log_id = session.get("x_last_api_log_id")
+        if isinstance(response, dict) and response.get("error") and not log_id:
+            log_id = None
+        session["x_trends_lookup_log_id"] = log_id
+        session["x_trends_lookup_error"] = error
+        session["x_trends_lookup_curl"] = curl_preview
+        session["x_trends_known_limit"] = known_limit
+        return redirect(url_for("x_api.trends"))
+
+    return render_template(
+        "x_api/trends.html",
+        woeid_input=woeid_input,
+        woeid_select=woeid_select,
+        max_trends=max_trends,
+        result=result,
+        error=error,
+        known_limit=known_limit,
+        curl_preview=curl_preview,
+        known_woeids=known_woeids,
+        common_woeids=common_woeids,
     )
 
 
