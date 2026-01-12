@@ -1,8 +1,10 @@
+import io
+from typing import Any
 from urllib.parse import urlencode
 
 import json
 
-from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, session, url_for
+from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, send_file, session, url_for
 import requests
 
 from app.blueprints.auth.decorators import login_required
@@ -13,7 +15,9 @@ from app.blueprints.x_api.helpers import (
     COMMUNITY_FIELDS,
     LIST_EXPANSIONS,
     LIST_FIELDS,
+    NEWS_FIELDS,
     PERSONALIZED_TREND_FIELDS,
+    IMAGE_FORMATS,
     SPACE_EXPANSIONS,
     SPACE_FIELDS,
     TWEET_EXPANSIONS,
@@ -21,6 +25,7 @@ from app.blueprints.x_api.helpers import (
     TREND_FIELDS,
     USER_FIELDS,
     _filter_fields,
+    _process_image_bytes,
     add_x_list_member,
     create_x_list,
     delete_x_list,
@@ -51,6 +56,13 @@ from app.blueprints.x_api.helpers import (
     get_x_users_by_usernames,
     get_x_personalized_trends,
     get_x_trends_by_woeid,
+    get_x_news_by_id,
+    get_x_media_upload_status,
+    initialize_x_media_upload,
+    append_x_media_upload,
+    finalize_x_media_upload,
+    upload_x_media_one_shot,
+    search_x_news,
     like_x_post,
     mute_x_user,
     pin_x_list,
@@ -64,7 +76,8 @@ from app.blueprints.x_api.helpers import (
     unpin_x_list,
     update_x_list,
 )
-from app.models import ApiRequestLog, UserOAuthToken, XPost, XSpace, XTrendSnapshot, XUser
+from app.extensions import db
+from app.models import ApiRequestLog, UserOAuthToken, XMediaUpload, XNewsStorySnapshot, XPost, XSpace, XTrendSnapshot, XUser
 from app.models import UserLinkedAccount
 
 bp = Blueprint("x_api", __name__, url_prefix="/x")
@@ -933,6 +946,493 @@ def trends():
         curl_preview=curl_preview,
         known_woeids=known_woeids,
         common_woeids=common_woeids,
+    )
+
+
+@bp.route("/news", methods=["GET", "POST"])
+@login_required
+def news():
+    news_id = ""
+    search_query = ""
+    search_max_results = ""
+    search_max_age_hours = ""
+    result = None
+    keep_result = session.pop("x_news_keep_result", False)
+    if request.method == "GET" and not keep_result:
+        session.pop("x_news_lookup_log_id", None)
+        session.pop("x_news_lookup_error", None)
+        session.pop("x_news_known_limit", None)
+        session.pop("x_news_lookup_curl", None)
+    error = session.get("x_news_lookup_error")
+    known_limit = session.get("x_news_known_limit")
+    curl_preview = session.get("x_news_lookup_curl")
+    log_id = session.get("x_news_lookup_log_id")
+
+    if log_id:
+        log = ApiRequestLog.query.get(log_id)
+        if log and log.response_body:
+            body = log.response_body
+            try:
+                result = json.loads(body)
+            except json.JSONDecodeError:
+                result = None
+                if body.startswith('"') and body.endswith('"'):
+                    try:
+                        unescaped = json.loads(body)
+                        if isinstance(unescaped, str) and unescaped.lstrip().startswith(("{", "[")):
+                            result = json.loads(unescaped)
+                    except json.JSONDecodeError:
+                        result = None
+                if result is None:
+                    result = {"raw": body}
+        if isinstance(result, dict) and isinstance(result.get("raw"), str):
+            raw_payload = result["raw"].lstrip()
+            if raw_payload.startswith(("{", "[")):
+                try:
+                    result = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    pass
+
+    recent_news = (
+        XNewsStorySnapshot.query.order_by(XNewsStorySnapshot.fetched_at.desc())
+        .limit(200)
+        .all()
+    )
+
+    if request.method == "POST":
+        known_limit = None
+        news_id = request.form.get("news_id", "").strip()
+        search_query = request.form.get("search_query", "").strip()
+        search_max_results = request.form.get("search_max_results", "").strip()
+        search_max_age_hours = request.form.get("search_max_age_hours", "").strip()
+        curl_preview = None
+
+        def build_curl(url: str, params_dict: dict | None = None) -> str:
+            if not params_dict:
+                return f'curl -H "Authorization: Bearer <token>" "{url}"'
+            query = urlencode(params_dict, safe=",")
+            return f'curl -H "Authorization: Bearer <token>" "{url}?{query}"'
+
+        action = request.form.get("news_action")
+        response = None
+        if action == "news_by_id":
+            if not news_id:
+                error = "Please provide a news ID."
+                flash(error, "warning")
+            else:
+                flash("News lookup started.", "info")
+                response = get_x_news_by_id(news_id)
+                params = {"news.fields": ",".join(_filter_fields(NEWS_FIELDS))}
+                curl_preview = build_curl("https://api.x.com/2/news/<ID>", params)
+        elif action == "search_news":
+            if not search_query:
+                error = "Please provide a search query."
+                flash(error, "warning")
+            else:
+                try:
+                    max_results = int(search_max_results) if search_max_results else 10
+                except ValueError:
+                    max_results = 10
+                max_results = min(max(max_results, 1), 100)
+                try:
+                    max_age_hours = int(search_max_age_hours) if search_max_age_hours else 168
+                except ValueError:
+                    max_age_hours = 168
+                max_age_hours = min(max(max_age_hours, 1), 720)
+                flash("News search started.", "info")
+                response = search_x_news(
+                    search_query,
+                    max_results=max_results,
+                    max_age_hours=max_age_hours,
+                )
+                params = {
+                    "query": "<QUERY>",
+                    "max_results": max_results,
+                    "max_age_hours": max_age_hours,
+                    "news.fields": ",".join(_filter_fields(NEWS_FIELDS)),
+                }
+                curl_preview = build_curl("https://api.x.com/2/news/search", params)
+        else:
+            response = None
+            error = "Please select a news action to run."
+            flash("Please select an action first.", "warning")
+
+        if response is None and error is None:
+            error = "Unable to call X API; check your credentials."
+            result = None
+            flash("Lookup failed. Check your credentials.", "danger")
+        elif response is not None:
+            def extract_problem(payload: dict) -> dict | None:
+                if not isinstance(payload, dict):
+                    return None
+                if payload.get("type") or payload.get("title"):
+                    return payload
+                errors = payload.get("errors")
+                if isinstance(errors, list) and errors:
+                    return errors[0]
+                return None
+
+            if isinstance(response, dict):
+                result = response
+                problem = extract_problem(result)
+                if problem and (
+                    problem.get("type") == "https://api.twitter.com/2/problems/unsupported-authentication"
+                    or problem.get("title") == "Unsupported Authentication"
+                ):
+                    known_limit = (
+                        "X returned Unsupported Authentication for this endpoint. "
+                        "News endpoints can require app-only access."
+                    )
+                    error = known_limit
+                    flash(known_limit, "warning")
+                if response.get("error"):
+                    flash(response["error"], "warning")
+                else:
+                    flash("Lookup complete.", "success")
+            else:
+                try:
+                    result = response.json()
+                except ValueError:
+                    result = {"raw": response.text}
+                problem = extract_problem(result)
+                if problem and (
+                    problem.get("type") == "https://api.twitter.com/2/problems/unsupported-authentication"
+                    or problem.get("title") == "Unsupported Authentication"
+                ):
+                    known_limit = (
+                        "X returned Unsupported Authentication for this endpoint. "
+                        "News endpoints can require app-only access."
+                    )
+                    error = known_limit
+                    flash(known_limit, "warning")
+                if response.status_code and response.status_code >= 400:
+                    flash(f"Lookup failed with status {response.status_code}.", "danger")
+                else:
+                    flash("Lookup complete.", "success")
+
+        session["x_news_keep_result"] = True
+        log_id = session.get("x_last_api_log_id")
+        if isinstance(response, dict) and response.get("error") and not log_id:
+            log_id = None
+        session["x_news_lookup_log_id"] = log_id
+        session["x_news_lookup_error"] = error
+        session["x_news_lookup_curl"] = curl_preview
+        session["x_news_known_limit"] = known_limit
+        return redirect(url_for("x_api.news"))
+
+    return render_template(
+        "x_api/news.html",
+        news_id=news_id,
+        search_query=search_query,
+        search_max_results=search_max_results,
+        search_max_age_hours=search_max_age_hours,
+        result=result,
+        error=error,
+        known_limit=known_limit,
+        curl_preview=curl_preview,
+        recent_news=recent_news,
+    )
+
+
+@bp.route("/media/<int:upload_id>/file")
+@login_required
+def media_file(upload_id: int):
+    upload = XMediaUpload.query.filter_by(id=upload_id, user_id=session.get("user_id")).first()
+    if not upload or not upload.file_blob:
+        return jsonify({"error": "Media not found."}), 404
+    return send_file(
+        io.BytesIO(upload.file_blob),
+        mimetype=upload.content_type or "application/octet-stream",
+        as_attachment=False,
+        download_name=upload.filename or f"media-{upload.id}",
+    )
+
+
+@bp.route("/media", methods=["GET", "POST"])
+@login_required
+def media():
+    media_id = ""
+    result = None
+    error = session.get("x_media_lookup_error")
+    curl_preview = session.get("x_media_lookup_curl")
+    log_id = session.get("x_media_lookup_log_id")
+    known_limit = session.get("x_media_known_limit")
+    keep_result = session.pop("x_media_keep_result", False)
+    if request.method == "GET" and not keep_result:
+        session.pop("x_media_lookup_log_id", None)
+        session.pop("x_media_lookup_error", None)
+        session.pop("x_media_known_limit", None)
+        session.pop("x_media_lookup_curl", None)
+    if log_id:
+        log = ApiRequestLog.query.get(log_id)
+        if log and log.response_body:
+            body = log.response_body
+            try:
+                result = json.loads(body)
+            except json.JSONDecodeError:
+                result = None
+                if body.startswith('"') and body.endswith('"'):
+                    try:
+                        unescaped = json.loads(body)
+                        if isinstance(unescaped, str) and unescaped.lstrip().startswith(("{", "[")):
+                            result = json.loads(unescaped)
+                    except json.JSONDecodeError:
+                        result = None
+                if result is None:
+                    result = {"raw": body}
+        if isinstance(result, dict) and isinstance(result.get("raw"), str):
+            raw_payload = result["raw"].lstrip()
+            if raw_payload.startswith(("{", "[")):
+                try:
+                    result = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    pass
+
+    recent_uploads = (
+        XMediaUpload.query.filter_by(user_id=session.get("user_id"))
+        .order_by(XMediaUpload.created_at.desc())
+        .limit(50)
+        .all()
+    )
+
+    def parse_response(response: Any) -> tuple[dict, int | None]:
+        if isinstance(response, dict):
+            return response, None
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"raw": response.text}
+        return payload, response.status_code
+
+    if request.method == "POST":
+        known_limit = None
+        action = request.form.get("media_action")
+        response = None
+        curl_preview = None
+        if action == "status":
+            media_id = request.form.get("media_id", "").strip()
+            if not media_id:
+                error = "Please provide a media ID."
+                flash(error, "warning")
+            else:
+                flash("Status lookup started.", "info")
+                response = get_x_media_upload_status(media_id)
+                curl_preview = (
+                    'curl -H "Authorization: Bearer <token>" '
+                    f'"https://api.x.com/2/media/upload?command=STATUS&media_id={media_id}"'
+                )
+        elif action == "upload":
+            upload_file = request.files.get("media_file")
+            if not upload_file or not upload_file.filename:
+                error = "Please choose a media file to upload."
+                flash(error, "warning")
+            else:
+                filename = upload_file.filename
+                original_bytes = upload_file.read()
+                content_type = upload_file.mimetype or "application/octet-stream"
+                media_category = request.form.get("media_category", "tweet_image").strip()
+                media_type = request.form.get("media_type", "").strip() or content_type
+                output_format = request.form.get("output_format", "").strip().lower() or None
+                shared = request.form.get("shared") == "on"
+
+                def parse_int(value: str) -> int | None:
+                    try:
+                        return int(value) if value else None
+                    except ValueError:
+                        return None
+
+                width = parse_int(request.form.get("resize_width", "").strip())
+                height = parse_int(request.form.get("resize_height", "").strip())
+                quality = parse_int(request.form.get("quality", "").strip())
+
+                processed_bytes = original_bytes
+                processed_format = None
+                stored_content_type = content_type
+                stored_width = None
+                stored_height = None
+                is_image = content_type.startswith("image/")
+                is_gif = content_type == "image/gif"
+                if is_image and not is_gif:
+                    processed_bytes, processed_format, stored_content_type, stored_width, stored_height = _process_image_bytes(
+                        original_bytes,
+                        output_format,
+                        width,
+                        height,
+                        quality,
+                    )
+
+                upload_mode = "oneshot"
+                if content_type.startswith("video/") or is_gif or len(processed_bytes) > 5 * 1024 * 1024:
+                    upload_mode = "chunked"
+
+                record = XMediaUpload(
+                    user_id=session.get("user_id"),
+                    x_user_id=session.get("active_x_user_id"),
+                    filename=filename,
+                    content_type=stored_content_type,
+                    media_category=media_category,
+                    media_type=media_type,
+                    output_format=processed_format,
+                    width=stored_width,
+                    height=stored_height,
+                    file_size=len(original_bytes),
+                    stored_size=len(processed_bytes),
+                    upload_mode=upload_mode,
+                    status="pending",
+                )
+                db.session.add(record)
+                db.session.flush()
+
+                if upload_mode == "oneshot":
+                    flash("Upload started.", "info")
+                    response = upload_x_media_one_shot(
+                        processed_bytes,
+                        filename=filename,
+                        media_category=media_category,
+                        media_type=media_type,
+                        shared=shared,
+                    )
+                    curl_parts = [
+                        'curl -X POST "https://api.x.com/2/media/upload"',
+                        '-H "Authorization: Bearer <token>"',
+                        '-H "Content-Type: multipart/form-data"',
+                        '-F "media=@/path/to/file"',
+                        f'-F "media_category={media_category}"',
+                    ]
+                    if media_type:
+                        curl_parts.append(f'-F "media_type={media_type}"')
+                    if shared:
+                        curl_parts.append('-F "shared=true"')
+                    curl_preview = " \\\n  ".join(curl_parts)
+                else:
+                    flash("Chunked upload started.", "info")
+                    init_response = initialize_x_media_upload(
+                        total_bytes=len(processed_bytes),
+                        media_type=media_type,
+                        media_category=media_category,
+                        shared=shared,
+                    )
+                    init_payload, init_status = parse_response(init_response)
+                    record.raw_response = init_payload
+                    media_id_value = (init_payload.get("data") or {}).get("id")
+                    if init_status and init_status >= 400:
+                        record.status = "failed"
+                        record.error_message = f"INIT failed with status {init_status}."
+                        response = init_response
+                    elif init_payload.get("error") or not media_id_value:
+                        record.status = "failed"
+                        record.error_message = init_payload.get("error") or "INIT failed."
+                        response = init_response
+                    else:
+                        chunk_size = 2 * 1024 * 1024
+                        for index in range(0, len(processed_bytes), chunk_size):
+                            chunk = processed_bytes[index:index + chunk_size]
+                            segment_index = index // chunk_size
+                            append_response = append_x_media_upload(
+                                media_id=str(media_id_value),
+                                segment_index=segment_index,
+                                chunk_bytes=chunk,
+                            )
+                            append_payload, append_status = parse_response(append_response)
+                            if append_status and append_status >= 400:
+                                record.status = "failed"
+                                record.error_message = f"APPEND failed with status {append_status}."
+                                response = append_response
+                                break
+                            if append_payload.get("error"):
+                                record.status = "failed"
+                                record.error_message = append_payload.get("error")
+                                response = append_response
+                                break
+                        if record.status != "failed":
+                            finalize_response = finalize_x_media_upload(str(media_id_value))
+                            finalize_payload, finalize_status = parse_response(finalize_response)
+                            record.raw_response = finalize_payload
+                            response = finalize_response
+                            if finalize_status and finalize_status >= 400:
+                                record.status = "failed"
+                                record.error_message = f"FINALIZE failed with status {finalize_status}."
+                            elif finalize_payload.get("error"):
+                                record.status = "failed"
+                                record.error_message = finalize_payload.get("error")
+                            else:
+                                record.status = "uploaded"
+
+                    curl_preview = (
+                        'curl -X POST "https://api.x.com/2/media/upload" '
+                        '-H "Authorization: Bearer <token>" '
+                        '-H "Content-Type: multipart/form-data" '
+                        f'-F "command=INIT" -F "media_type={media_type}" '
+                        f'-F "total_bytes={len(processed_bytes)}" '
+                        + (f'-F "media_category={media_category}" ' if media_category else "")
+                    ).strip()
+
+                payload, status_code = parse_response(response) if response is not None else ({}, None)
+                record.raw_response = payload
+                if payload.get("data"):
+                    record.media_id = payload["data"].get("id") or record.media_id
+                    record.media_key = payload["data"].get("media_key") or record.media_key
+                    processing = payload["data"].get("processing_info") or {}
+                    if processing.get("state") in {"pending", "in_progress"}:
+                        record.status = "processing"
+                    elif record.status not in {"failed"}:
+                        record.status = "uploaded"
+                if status_code and status_code >= 400:
+                    record.status = "failed"
+                    record.error_message = f"Upload failed with status {status_code}."
+                if payload.get("error"):
+                    record.status = "failed"
+                    record.error_message = payload.get("error")
+                if record.status not in {"failed"} and payload.get("data"):
+                    record.file_blob = processed_bytes
+
+                db.session.commit()
+                recent_uploads = (
+                    XMediaUpload.query.filter_by(user_id=session.get("user_id"))
+                    .order_by(XMediaUpload.created_at.desc())
+                    .limit(50)
+                    .all()
+                )
+
+                if record.status == "failed":
+                    error = record.error_message or "Upload failed."
+                    flash(error, "warning")
+                else:
+                    flash("Upload complete.", "success")
+        else:
+            error = "Please select a media action to run."
+            flash(error, "warning")
+
+        if response is None and error is None:
+            error = "Unable to call X API; check your credentials."
+            result = None
+            flash("Lookup failed. Check your credentials.", "danger")
+        elif response is not None:
+            result, _ = parse_response(response)
+            if isinstance(response, dict) and response.get("error"):
+                flash(response["error"], "warning")
+            elif not error:
+                flash("Lookup complete.", "success")
+
+        session["x_media_keep_result"] = True
+        log_id = session.get("x_last_api_log_id")
+        if isinstance(response, dict) and response.get("error") and not log_id:
+            log_id = None
+        session["x_media_lookup_log_id"] = log_id
+        session["x_media_lookup_error"] = error
+        session["x_media_lookup_curl"] = curl_preview
+        session["x_media_known_limit"] = known_limit
+        return redirect(url_for("x_api.media"))
+
+    return render_template(
+        "x_api/media.html",
+        media_id=media_id,
+        result=result,
+        error=error,
+        known_limit=known_limit,
+        curl_preview=curl_preview,
+        recent_uploads=recent_uploads,
+        image_format_options=sorted(set(value[0].lower() for value in IMAGE_FORMATS.values())),
     )
 
 

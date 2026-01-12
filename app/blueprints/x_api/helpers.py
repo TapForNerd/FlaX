@@ -1,12 +1,14 @@
+import io
 import json
 import re
 from datetime import datetime
 from typing import Any, Mapping
 
 import requests
+from PIL import Image
 
 from app.extensions import db
-from app.models import ApiRequestLog, AnnotationDomain, AnnotationEntity, PostContextAnnotation, User, XPost, XSpace, XSpaceSnapshot, XTrendSnapshot, XUser
+from app.models import ApiRequestLog, AnnotationDomain, AnnotationEntity, PostContextAnnotation, User, XMediaUpload, XNewsStorySnapshot, XPost, XSpace, XSpaceSnapshot, XTrendSnapshot, XUser
 from flask import session
 
 from app.blueprints.auth.token_helpers import call_x_api_with_refresh, get_current_user_token
@@ -115,9 +117,29 @@ PERSONALIZED_TREND_FIELDS = [
     "trending_since",
 ]
 
+NEWS_FIELDS = [
+    "category",
+    "cluster_posts_results",
+    "contexts",
+    "disclaimer",
+    "hook",
+    "id",
+    "keywords",
+    "name",
+    "summary",
+    "updated_at",
+]
+
 TWEET_EXPANSIONS = [
     "author_id",
 ]
+
+IMAGE_FORMATS = {
+    "jpeg": ("JPEG", "image/jpeg"),
+    "jpg": ("JPEG", "image/jpeg"),
+    "png": ("PNG", "image/png"),
+    "webp": ("WEBP", "image/webp"),
+}
 
 SPACE_FIELDS = [
     "created_at",
@@ -269,6 +291,242 @@ def _store_trend_snapshots(
             raw_trend_data=trend,
         )
         db.session.add(snapshot)
+
+
+def _store_news_snapshots(
+    stories: list[Mapping[str, Any]],
+    source: str,
+) -> None:
+    for story in stories:
+        story_id = story.get("id") or story.get("rest_id")
+        if not story_id:
+            continue
+        snapshot = XNewsStorySnapshot(
+            news_id=str(story_id),
+            source=source,
+            name=story.get("name"),
+            category=story.get("category"),
+            summary=story.get("summary"),
+            hook=story.get("hook"),
+            disclaimer=story.get("disclaimer"),
+            last_updated_at=_parse_iso8601(story.get("last_updated_at_ms") or story.get("updated_at")),
+            raw_news_data=story,
+        )
+        db.session.add(snapshot)
+
+
+def _process_image_bytes(
+    file_bytes: bytes,
+    output_format: str | None,
+    width: int | None,
+    height: int | None,
+    quality: int | None,
+) -> tuple[bytes, str, str, int | None, int | None]:
+    image = Image.open(io.BytesIO(file_bytes))
+    if width or height:
+        target_width = width or int(image.width * (height / image.height))
+        target_height = height or int(image.height * (width / image.width))
+        image = image.resize((target_width, target_height), Image.LANCZOS)
+
+    format_key = (output_format or image.format or "JPEG").lower()
+    format_name, content_type = IMAGE_FORMATS.get(format_key, ("JPEG", "image/jpeg"))
+    if format_name == "JPEG" and image.mode in {"RGBA", "P"}:
+        image = image.convert("RGB")
+
+    buffer = io.BytesIO()
+    save_kwargs = {}
+    if format_name in {"JPEG", "WEBP"} and quality:
+        save_kwargs["quality"] = quality
+        save_kwargs["optimize"] = True
+    image.save(buffer, format_name, **save_kwargs)
+    return buffer.getvalue(), format_name.lower(), content_type, image.width, image.height
+
+
+def upload_x_media_one_shot(
+    file_bytes: bytes,
+    filename: str,
+    media_category: str,
+    media_type: str | None = None,
+    shared: bool = False,
+    additional_owners: list[str] | None = None,
+) -> Any:
+    data = {"media_category": media_category}
+    if media_type:
+        data["media_type"] = media_type
+    if shared:
+        data["shared"] = "true"
+    if additional_owners:
+        data["additional_owners"] = ",".join(additional_owners)
+
+    files = {"media": (filename, file_bytes, media_type or "application/octet-stream")}
+    response = call_x_api_with_refresh(
+        requests.post,
+        "https://api.x.com/2/media/upload",
+        data=data,
+        files=files,
+        timeout=30,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/media/upload",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    return response
+
+
+def initialize_x_media_upload(
+    total_bytes: int,
+    media_type: str,
+    media_category: str | None = None,
+    shared: bool = False,
+    additional_owners: list[str] | None = None,
+) -> Any:
+    data = {
+        "command": "INIT",
+        "total_bytes": str(total_bytes),
+        "media_type": media_type,
+    }
+    if media_category:
+        data["media_category"] = media_category
+    if shared:
+        data["shared"] = "true"
+    if additional_owners:
+        data["additional_owners"] = ",".join(additional_owners)
+
+    response = call_x_api_with_refresh(
+        requests.post,
+        "https://api.x.com/2/media/upload",
+        data=data,
+        timeout=30,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/media/upload",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    return response
+
+
+def append_x_media_upload(
+    media_id: str,
+    segment_index: int,
+    chunk_bytes: bytes,
+) -> Any:
+    data = {
+        "command": "APPEND",
+        "media_id": str(media_id),
+        "segment_index": str(segment_index),
+    }
+    files = {"media": ("chunk", chunk_bytes, "application/octet-stream")}
+    response = call_x_api_with_refresh(
+        requests.post,
+        "https://api.x.com/2/media/upload",
+        data=data,
+        files=files,
+        timeout=60,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/media/upload",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    return response
+
+
+def finalize_x_media_upload(media_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.post,
+        "https://api.x.com/2/media/upload",
+        data={"command": "FINALIZE", "media_id": str(media_id)},
+        timeout=30,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/media/upload",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    return response
+
+
+def get_x_media_upload_status(media_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        "https://api.x.com/2/media/upload",
+        params={"command": "STATUS", "media_id": media_id},
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            "https://api.x.com/2/media/upload",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    db.session.commit()
+    return response
 
 
 def _upsert_context_annotations(post_id: int, annotations: list[Mapping[str, Any]]) -> None:
@@ -1515,6 +1773,81 @@ def get_x_personalized_trends() -> Any:
         return response
 
     _store_trend_snapshots(payload.get("data", []) or [], "personalized", woeid=None)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_news_by_id(news_id: str) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    response = requests.get(
+        f"https://api.x.com/2/news/{news_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"news.fields": ",".join(_filter_fields(NEWS_FIELDS))},
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_news_snapshots([payload["data"]], "id")
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def search_x_news(
+    query: str,
+    max_results: int = 10,
+    max_age_hours: int = 168,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    response = requests.get(
+        "https://api.x.com/2/news/search",
+        headers={"Authorization": f"Bearer {token}"},
+        params={
+            "query": query,
+            "max_results": max_results,
+            "max_age_hours": max_age_hours,
+            "news.fields": ",".join(_filter_fields(NEWS_FIELDS)),
+        },
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_news_snapshots(payload.get("data", []) or [], "search")
     db.session.commit()
 
     print(json.dumps(payload, indent=4))

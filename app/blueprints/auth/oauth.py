@@ -25,6 +25,7 @@ def build_authorize_url(redirect_uri, state, code_challenge):
         "mute.write",
         "list.read",
         "list.write",
+        "media.write",
         "offline.access",
     ]
     params = {

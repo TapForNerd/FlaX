@@ -208,3 +208,45 @@ class XTrendSnapshot(db.Model):
     trending_since = db.Column(db.String(80))
     raw_trend_data = db.Column(JSON, nullable=False, default=dict)
     fetched_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+
+
+class XNewsStorySnapshot(db.Model):
+    __tablename__ = "x_news_story_snapshots"
+
+    id = db.Column(db.Integer, primary_key=True)
+    news_id = db.Column(db.String(32), nullable=False, index=True)
+    source = db.Column(db.String(30), nullable=False, index=True)
+    name = db.Column(db.String(500))
+    category = db.Column(db.String(120))
+    summary = db.Column(db.Text)
+    hook = db.Column(db.Text)
+    disclaimer = db.Column(db.Text)
+    last_updated_at = db.Column(db.DateTime(timezone=True))
+    raw_news_data = db.Column(JSON, nullable=False, default=dict)
+    fetched_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+
+
+class XMediaUpload(db.Model):
+    __tablename__ = "x_media_uploads"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    x_user_id = db.Column(db.String(64))
+    filename = db.Column(db.String(255))
+    content_type = db.Column(db.String(120))
+    media_category = db.Column(db.String(40))
+    media_type = db.Column(db.String(60))
+    output_format = db.Column(db.String(20))
+    width = db.Column(db.Integer)
+    height = db.Column(db.Integer)
+    file_size = db.Column(db.Integer)
+    stored_size = db.Column(db.Integer)
+    upload_mode = db.Column(db.String(20))
+    status = db.Column(db.String(30), nullable=False, default="pending")
+    error_message = db.Column(db.Text)
+    media_id = db.Column(db.String(32))
+    media_key = db.Column(db.String(64))
+    raw_response = db.Column(JSON)
+    file_blob = db.Column(db.LargeBinary)
+    created_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+    updated_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), onupdate=db.func.now())
