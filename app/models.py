@@ -128,6 +128,45 @@ class XPost(db.Model):
     author = db.relationship("XUser", backref="posts", foreign_keys=[author_id])
 
 
+class XSpace(db.Model):
+    __tablename__ = "x_spaces"
+
+    id = db.Column(db.String(20), primary_key=True)
+    state = db.Column(db.String(20), nullable=False, index=True)
+    title = db.Column(db.String(500))
+    creator_id = db.Column(db.BigInteger, db.ForeignKey("x_users.id"), nullable=True, index=True)
+    scheduled_start = db.Column(db.DateTime(timezone=True))
+    started_at = db.Column(db.DateTime(timezone=True))
+    ended_at = db.Column(db.DateTime(timezone=True))
+    participant_count = db.Column(db.Integer)
+    subscriber_count = db.Column(db.Integer)
+    lang = db.Column(db.String(10))
+    is_ticketed = db.Column(db.Boolean)
+    raw_space_data = db.Column(JSON, nullable=False, default=dict)
+    last_updated_at = db.Column(
+        db.DateTime(timezone=True),
+        server_default=db.func.now(),
+        onupdate=db.func.now(),
+    )
+
+    creator = db.relationship("XUser", backref="spaces", foreign_keys=[creator_id])
+
+
+class XSpaceSnapshot(db.Model):
+    __tablename__ = "x_space_snapshots"
+
+    id = db.Column(db.Integer, primary_key=True)
+    space_id = db.Column(db.String(20), db.ForeignKey("x_spaces.id"), nullable=False, index=True)
+    fetched_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+    source = db.Column(db.String(50), nullable=False)
+    state = db.Column(db.String(20))
+    participant_count = db.Column(db.Integer)
+    subscriber_count = db.Column(db.Integer)
+    raw_space_data = db.Column(JSON, nullable=False, default=dict)
+
+    space = db.relationship("XSpace", backref="snapshots")
+
+
 class AnnotationDomain(db.Model):
     __tablename__ = "annotation_domains"
 
@@ -154,3 +193,77 @@ class PostContextAnnotation(db.Model):
     post = db.relationship("XPost", backref="context_annotations")
     domain = db.relationship("AnnotationDomain")
     entity = db.relationship("AnnotationEntity")
+
+
+class XTrendSnapshot(db.Model):
+    __tablename__ = "x_trend_snapshots"
+
+    id = db.Column(db.Integer, primary_key=True)
+    woeid = db.Column(db.Integer, index=True)
+    source = db.Column(db.String(30), nullable=False, index=True)
+    trend_name = db.Column(db.String(255), nullable=False, index=True)
+    tweet_count = db.Column(db.Integer)
+    post_count = db.Column(db.Integer)
+    category = db.Column(db.String(120))
+    trending_since = db.Column(db.String(80))
+    raw_trend_data = db.Column(JSON, nullable=False, default=dict)
+    fetched_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+
+
+class XNewsStorySnapshot(db.Model):
+    __tablename__ = "x_news_story_snapshots"
+
+    id = db.Column(db.Integer, primary_key=True)
+    news_id = db.Column(db.String(32), nullable=False, index=True)
+    source = db.Column(db.String(30), nullable=False, index=True)
+    name = db.Column(db.String(500))
+    category = db.Column(db.String(120))
+    summary = db.Column(db.Text)
+    hook = db.Column(db.Text)
+    disclaimer = db.Column(db.Text)
+    last_updated_at = db.Column(db.DateTime(timezone=True))
+    raw_news_data = db.Column(JSON, nullable=False, default=dict)
+    fetched_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+
+
+class XMediaUpload(db.Model):
+    __tablename__ = "x_media_uploads"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    x_user_id = db.Column(db.String(64))
+    filename = db.Column(db.String(255))
+    content_type = db.Column(db.String(120))
+    media_category = db.Column(db.String(40))
+    media_type = db.Column(db.String(60))
+    output_format = db.Column(db.String(20))
+    width = db.Column(db.Integer)
+    height = db.Column(db.Integer)
+    file_size = db.Column(db.Integer)
+    stored_size = db.Column(db.Integer)
+    upload_mode = db.Column(db.String(20))
+    status = db.Column(db.String(30), nullable=False, default="pending")
+    error_message = db.Column(db.Text)
+    media_id = db.Column(db.String(32))
+    media_key = db.Column(db.String(64))
+    raw_response = db.Column(JSON)
+    file_blob = db.Column(db.LargeBinary)
+    created_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)
+    updated_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), onupdate=db.func.now())
+
+
+class XUsageSnapshot(db.Model):
+    __tablename__ = "x_usage_snapshots"
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    days = db.Column(db.Integer, nullable=False, default=1)
+    hours = db.Column(db.Integer)
+    cap_reset_day = db.Column(db.Integer)
+    project_cap = db.Column(db.Integer)
+    project_id = db.Column(db.String(32))
+    project_usage = db.Column(db.Integer)
+    daily_project_usage = db.Column(JSON)
+    daily_client_app_usage = db.Column(JSON)
+    raw_usage_data = db.Column(JSON)
+    created_at = db.Column(db.DateTime(timezone=True), server_default=db.func.now(), nullable=False)

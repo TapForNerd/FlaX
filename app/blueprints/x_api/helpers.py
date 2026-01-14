@@ -1,11 +1,14 @@
+import io
 import json
+import re
 from datetime import datetime
 from typing import Any, Mapping
 
 import requests
+from PIL import Image
 
 from app.extensions import db
-from app.models import ApiRequestLog, AnnotationDomain, AnnotationEntity, PostContextAnnotation, User, XPost, XUser
+from app.models import ApiRequestLog, AnnotationDomain, AnnotationEntity, PostContextAnnotation, User, XMediaUpload, XNewsStorySnapshot, XPost, XSpace, XSpaceSnapshot, XTrendSnapshot, XUsageSnapshot, XUser
 from flask import session
 
 from app.blueprints.auth.token_helpers import call_x_api_with_refresh, get_current_user_token
@@ -77,6 +80,158 @@ EXPANSIONS = [
     "pinned_tweet_id",
 ]
 
+LIST_FIELDS = [
+    "created_at",
+    "description",
+    "follower_count",
+    "id",
+    "member_count",
+    "name",
+    "owner_id",
+    "private",
+]
+
+LIST_EXPANSIONS = [
+    "owner_id",
+]
+
+COMMUNITY_FIELDS = [
+    "access",
+    "created_at",
+    "description",
+    "id",
+    "join_policy",
+    "member_count",
+    "name",
+]
+
+TREND_FIELDS = [
+    "trend_name",
+    "tweet_count",
+]
+
+PERSONALIZED_TREND_FIELDS = [
+    "category",
+    "post_count",
+    "trend_name",
+    "trending_since",
+]
+
+NEWS_FIELDS = [
+    "category",
+    "cluster_posts_results",
+    "contexts",
+    "disclaimer",
+    "hook",
+    "id",
+    "keywords",
+    "name",
+    "summary",
+    "updated_at",
+]
+
+ACTIVITY_EVENT_TYPES = [
+    "profile.update.bio",
+    "profile.update.profile_picture",
+    "profile.update.banner_picture",
+    "profile.update.geo",
+    "profile.update.url",
+    "profile.update.screenname",
+    "profile.update.verified_badge",
+    "follow.follow",
+    "follow.unfollow",
+    "news.new",
+]
+
+USAGE_FIELDS = [
+    "cap_reset_day",
+    "daily_client_app_usage",
+    "daily_project_usage",
+    "project_cap",
+    "project_id",
+    "project_usage",
+]
+
+TWEET_EXPANSIONS = [
+    "author_id",
+]
+
+MEDIA_FIELDS = [
+    "alt_text",
+    "duration_ms",
+    "height",
+    "media_key",
+    "non_public_metrics",
+    "organic_metrics",
+    "preview_image_url",
+    "promoted_metrics",
+    "public_metrics",
+    "type",
+    "url",
+    "variants",
+    "width",
+]
+
+POLL_FIELDS = [
+    "duration_minutes",
+    "end_datetime",
+    "id",
+    "options",
+    "voting_status",
+]
+
+PLACE_FIELDS = [
+    "contained_within",
+    "country",
+    "country_code",
+    "full_name",
+    "geo",
+    "id",
+    "name",
+    "place_type",
+]
+
+SEARCH_COUNT_FIELDS = [
+    "end",
+    "start",
+    "tweet_count",
+]
+
+IMAGE_FORMATS = {
+    "jpeg": ("JPEG", "image/jpeg"),
+    "jpg": ("JPEG", "image/jpeg"),
+    "png": ("PNG", "image/png"),
+    "webp": ("WEBP", "image/webp"),
+}
+
+SPACE_FIELDS = [
+    "created_at",
+    "creator_id",
+    "ended_at",
+    "host_ids",
+    "id",
+    "invited_user_ids",
+    "is_ticketed",
+    "lang",
+    "participant_count",
+    "scheduled_start",
+    "speaker_ids",
+    "started_at",
+    "state",
+    "subscriber_count",
+    "title",
+    "topic_ids",
+    "updated_at",
+]
+
+SPACE_EXPANSIONS = [
+    "creator_id",
+    "host_ids",
+    "invited_user_ids",
+    "speaker_ids",
+    "topic_ids",
+]
+
 
 def _filter_fields(fields: list[str]) -> list[str]:
     return [
@@ -136,6 +291,315 @@ def _upsert_x_post(payload: Mapping[str, Any]) -> XPost | None:
     record.raw_post_data = payload
     _upsert_context_annotations(record.id, payload.get("context_annotations") or [])
     return record
+
+
+def _store_post_payload(payload: Mapping[str, Any]) -> None:
+    includes = payload.get("includes") or {}
+    for user in includes.get("users", []) or []:
+        _upsert_x_user(user)
+    for post in payload.get("data", []) or []:
+        _upsert_x_post(post)
+    for post in includes.get("tweets", []) or []:
+        _upsert_x_post(post)
+
+
+def _upsert_x_space(payload: Mapping[str, Any]) -> XSpace | None:
+    space_id = payload.get("id")
+    if not space_id:
+        return None
+
+    record = db.session.get(XSpace, space_id)
+    if record is None:
+        record = XSpace(id=space_id, state=payload.get("state") or "unknown")
+        db.session.add(record)
+
+    record.state = payload.get("state", record.state)
+    record.title = payload.get("title", record.title)
+    creator_id = payload.get("creator_id")
+    try:
+        record.creator_id = int(creator_id) if creator_id else record.creator_id
+    except (TypeError, ValueError):
+        record.creator_id = record.creator_id
+    record.scheduled_start = _parse_iso8601(payload.get("scheduled_start")) or record.scheduled_start
+    record.started_at = _parse_iso8601(payload.get("started_at")) or record.started_at
+    record.ended_at = _parse_iso8601(payload.get("ended_at")) or record.ended_at
+    record.participant_count = payload.get("participant_count", record.participant_count)
+    record.subscriber_count = payload.get("subscriber_count", record.subscriber_count)
+    record.lang = payload.get("lang", record.lang)
+    record.is_ticketed = payload.get("is_ticketed", record.is_ticketed)
+    record.raw_space_data = payload
+
+    return record
+
+
+def _record_space_snapshot(space: XSpace, payload: Mapping[str, Any], source: str) -> None:
+    snapshot = XSpaceSnapshot(
+        space_id=space.id,
+        source=source,
+        state=payload.get("state"),
+        participant_count=payload.get("participant_count"),
+        subscriber_count=payload.get("subscriber_count"),
+        raw_space_data=payload,
+    )
+    db.session.add(snapshot)
+
+
+def _store_trend_snapshots(
+    trends: list[Mapping[str, Any]],
+    source: str,
+    woeid: int | None = None,
+) -> None:
+    for trend in trends:
+        trend_name = trend.get("trend_name")
+        if not trend_name:
+            continue
+        snapshot = XTrendSnapshot(
+            woeid=woeid,
+            source=source,
+            trend_name=str(trend_name),
+            tweet_count=trend.get("tweet_count"),
+            post_count=trend.get("post_count"),
+            category=trend.get("category"),
+            trending_since=trend.get("trending_since"),
+            raw_trend_data=trend,
+        )
+        db.session.add(snapshot)
+
+
+def _store_news_snapshots(
+    stories: list[Mapping[str, Any]],
+    source: str,
+) -> None:
+    for story in stories:
+        story_id = story.get("id") or story.get("rest_id")
+        if not story_id:
+            continue
+        snapshot = XNewsStorySnapshot(
+            news_id=str(story_id),
+            source=source,
+            name=story.get("name"),
+            category=story.get("category"),
+            summary=story.get("summary"),
+            hook=story.get("hook"),
+            disclaimer=story.get("disclaimer"),
+            last_updated_at=_parse_iso8601(story.get("last_updated_at_ms") or story.get("updated_at")),
+            raw_news_data=story,
+        )
+        db.session.add(snapshot)
+
+
+def _process_image_bytes(
+    file_bytes: bytes,
+    output_format: str | None,
+    width: int | None,
+    height: int | None,
+    quality: int | None,
+) -> tuple[bytes, str, str, int | None, int | None]:
+    image = Image.open(io.BytesIO(file_bytes))
+    if width or height:
+        target_width = width or int(image.width * (height / image.height))
+        target_height = height or int(image.height * (width / image.width))
+        image = image.resize((target_width, target_height), Image.LANCZOS)
+
+    format_key = (output_format or image.format or "JPEG").lower()
+    format_name, content_type = IMAGE_FORMATS.get(format_key, ("JPEG", "image/jpeg"))
+    if format_name == "JPEG" and image.mode in {"RGBA", "P"}:
+        image = image.convert("RGB")
+
+    buffer = io.BytesIO()
+    save_kwargs = {}
+    if format_name in {"JPEG", "WEBP"} and quality:
+        save_kwargs["quality"] = quality
+        save_kwargs["optimize"] = True
+    image.save(buffer, format_name, **save_kwargs)
+    return buffer.getvalue(), format_name.lower(), content_type, image.width, image.height
+
+
+def upload_x_media_one_shot(
+    file_bytes: bytes,
+    filename: str,
+    media_category: str,
+    media_type: str | None = None,
+    shared: bool = False,
+    additional_owners: list[str] | None = None,
+) -> Any:
+    data = {"media_category": media_category}
+    if media_type:
+        data["media_type"] = media_type
+    if shared:
+        data["shared"] = "true"
+    if additional_owners:
+        data["additional_owners"] = ",".join(additional_owners)
+
+    files = {"media": (filename, file_bytes, media_type or "application/octet-stream")}
+    response = call_x_api_with_refresh(
+        requests.post,
+        "https://api.x.com/2/media/upload",
+        data=data,
+        files=files,
+        timeout=30,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/media/upload",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    return response
+
+
+def initialize_x_media_upload(
+    total_bytes: int,
+    media_type: str,
+    media_category: str | None = None,
+    shared: bool = False,
+    additional_owners: list[str] | None = None,
+) -> Any:
+    data = {
+        "command": "INIT",
+        "total_bytes": str(total_bytes),
+        "media_type": media_type,
+    }
+    if media_category:
+        data["media_category"] = media_category
+    if shared:
+        data["shared"] = "true"
+    if additional_owners:
+        data["additional_owners"] = ",".join(additional_owners)
+
+    response = call_x_api_with_refresh(
+        requests.post,
+        "https://api.x.com/2/media/upload",
+        data=data,
+        timeout=30,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/media/upload",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    return response
+
+
+def append_x_media_upload(
+    media_id: str,
+    segment_index: int,
+    chunk_bytes: bytes,
+) -> Any:
+    data = {
+        "command": "APPEND",
+        "media_id": str(media_id),
+        "segment_index": str(segment_index),
+    }
+    files = {"media": ("chunk", chunk_bytes, "application/octet-stream")}
+    response = call_x_api_with_refresh(
+        requests.post,
+        "https://api.x.com/2/media/upload",
+        data=data,
+        files=files,
+        timeout=60,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/media/upload",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    return response
+
+
+def finalize_x_media_upload(media_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.post,
+        "https://api.x.com/2/media/upload",
+        data={"command": "FINALIZE", "media_id": str(media_id)},
+        timeout=30,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/media/upload",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    return response
+
+
+def get_x_media_upload_status(media_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        "https://api.x.com/2/media/upload",
+        params={"command": "STATUS", "media_id": media_id},
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            "https://api.x.com/2/media/upload",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    db.session.commit()
+    return response
 
 
 def _upsert_context_annotations(post_id: int, annotations: list[Mapping[str, Any]]) -> None:
@@ -305,6 +769,25 @@ def resolve_x_user_id(identifier: str | None) -> tuple[str | None, str | None]:
     return None, f"Unable to resolve @{username}. Try again or use an ID."
 
 
+def resolve_x_post_id(identifier: str | None) -> tuple[str | None, str | None]:
+    """Resolve a post identifier into a numeric post id."""
+    if not identifier:
+        return None, "Please provide a post ID."
+
+    cleaned = str(identifier).strip()
+    if not cleaned:
+        return None, "Please provide a post ID."
+
+    if cleaned.isdigit():
+        return cleaned, None
+
+    match = re.search(r"/status/(\d+)", cleaned) or re.search(r"/posts/(\d+)", cleaned)
+    if match:
+        return match.group(1), None
+
+    return None, "Please provide a post ID or a post URL."
+
+
 def print_x_key(payload: Mapping[str, Any], key: str) -> Any:
     """Print and return a specific key from an X API response payload."""
     value = payload.get(key)
@@ -315,8 +798,9 @@ def print_x_key(payload: Mapping[str, Any], key: str) -> Any:
 def get_x_user_by_username(username: str) -> Any:
     token = get_app_var("X_BEARER_TOKEN")
     if not token:
-        print("Missing X_BEARER_TOKEN; update .env or app_vars before calling.")
-        return None
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
 
     url = f"https://api.x.com/2/users/by/username/{username}"
     params = {
@@ -558,6 +1042,61 @@ def get_x_users_by_ids(user_ids: list[str] | str) -> Any:
     return response
 
 
+def get_x_users_by_ids_with_app_token(user_ids: list[str] | str) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        print("Missing X_BEARER_TOKEN; update .env or app_vars before calling.")
+        return {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+
+    if isinstance(user_ids, str):
+        user_ids = [item.strip() for item in user_ids.split(",")]
+    cleaned = [item.strip() for item in user_ids if item and item.strip()]
+    if not cleaned:
+        print("Provide at least one user id.")
+        return None
+    if len(cleaned) > 100:
+        cleaned = cleaned[:100]
+
+    params = {
+        "ids": ",".join(cleaned),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        "expansions": ",".join(_filter_fields(EXPANSIONS)),
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+    }
+
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.get(
+        "https://api.x.com/2/users",
+        headers=headers,
+        params=params,
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    for user in payload.get("data", []) or []:
+        _upsert_x_user(user)
+
+    includes = payload.get("includes", {})
+    for post in includes.get("tweets", []) or []:
+        _upsert_x_post(post)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
 def get_x_users_search(query: str, max_results: int = 100, next_token: str | None = None) -> Any:
     response = call_x_api_with_refresh(
         requests.get,
@@ -607,6 +1146,199 @@ def get_x_users_search(query: str, max_results: int = 100, next_token: str | Non
     db.session.commit()
 
     print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_spaces_by_ids(space_ids: list[str] | str) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        print("Missing X_BEARER_TOKEN; update .env or app_vars before calling.")
+        return {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+
+    if isinstance(space_ids, str):
+        space_ids = [item.strip() for item in space_ids.split(",")]
+    cleaned = [space_id.strip() for space_id in space_ids if space_id and space_id.strip()]
+    if not cleaned:
+        print("Provide at least one Space ID.")
+        return None
+    if len(cleaned) > 100:
+        cleaned = cleaned[:100]
+
+    params = {
+        "ids": ",".join(cleaned),
+        "space.fields": ",".join(_filter_fields(SPACE_FIELDS)),
+        "expansions": ",".join(SPACE_EXPANSIONS),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+    }
+
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.get(
+        "https://api.x.com/2/spaces",
+        headers=headers,
+        params=params,
+        timeout=10,
+    )
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if payload and payload.get("data"):
+        for space_payload in payload.get("data", []) or []:
+            space = _upsert_x_space(space_payload)
+            if space:
+                _record_space_snapshot(space, space_payload, "spaces_by_ids")
+        includes = payload.get("includes", {})
+        for user in includes.get("users", []) or []:
+            _upsert_x_user(user)
+        db.session.commit()
+    return response
+
+
+def get_x_spaces_by_creator_ids(user_ids: list[str] | str) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        print("Missing X_BEARER_TOKEN; update .env or app_vars before calling.")
+        return {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+
+    if isinstance(user_ids, str):
+        user_ids = [item.strip() for item in user_ids.split(",")]
+    cleaned = [user_id.strip() for user_id in user_ids if user_id and user_id.strip()]
+    if not cleaned:
+        print("Provide at least one user id.")
+        return None
+    if len(cleaned) > 100:
+        cleaned = cleaned[:100]
+
+    params = {
+        "user_ids": ",".join(cleaned),
+        "space.fields": ",".join(_filter_fields(SPACE_FIELDS)),
+        "expansions": ",".join(SPACE_EXPANSIONS),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+    }
+
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.get(
+        "https://api.x.com/2/spaces/by/creator_ids",
+        headers=headers,
+        params=params,
+        timeout=10,
+    )
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if payload and payload.get("data"):
+        for space_payload in payload.get("data", []) or []:
+            space = _upsert_x_space(space_payload)
+            if space:
+                _record_space_snapshot(space, space_payload, "spaces_by_creator_ids")
+        includes = payload.get("includes", {})
+        for user in includes.get("users", []) or []:
+            _upsert_x_user(user)
+        db.session.commit()
+    return response
+
+
+def get_x_spaces_search(query: str, state: str = "all", max_results: int = 100, next_token: str | None = None) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        print("Missing X_BEARER_TOKEN; update .env or app_vars before calling.")
+        return {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+
+    if not query:
+        print("Provide a search query.")
+        return None
+
+    params = {
+        "query": query,
+        "state": state or "all",
+        "max_results": max_results,
+        "space.fields": ",".join(_filter_fields(SPACE_FIELDS)),
+        "expansions": ",".join(SPACE_EXPANSIONS),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+    }
+    if next_token:
+        params["next_token"] = next_token
+
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.get(
+        "https://api.x.com/2/spaces/search",
+        headers=headers,
+        params=params,
+        timeout=10,
+    )
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if payload and payload.get("data"):
+        for space_payload in payload.get("data", []) or []:
+            space = _upsert_x_space(space_payload)
+            if space:
+                _record_space_snapshot(space, space_payload, "spaces_search")
+        includes = payload.get("includes", {})
+        for user in includes.get("users", []) or []:
+            _upsert_x_user(user)
+        db.session.commit()
+    return response
+
+
+def get_x_space_posts(space_id: str, max_results: int = 100) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        print("Missing X_BEARER_TOKEN; update .env or app_vars before calling.")
+        return {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+
+    cleaned = str(space_id).strip()
+    if not cleaned:
+        print("Provide a Space ID.")
+        return None
+
+    params = {
+        "max_results": max_results,
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+    }
+
+    headers = {"Authorization": f"Bearer {token}"}
+    response = requests.get(
+        f"https://api.x.com/2/spaces/{cleaned}/tweets",
+        headers=headers,
+        params=params,
+        timeout=10,
+    )
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if payload and payload.get("data"):
+        for post in payload.get("data", []) or []:
+            _upsert_x_post(post)
+        includes = payload.get("includes", {})
+        for user in includes.get("users", []) or []:
+            _upsert_x_user(user)
+        db.session.commit()
     return response
 
 
@@ -745,6 +1477,2152 @@ def unmute_x_user(target_user_id: str) -> Any:
         _log_api_request(
             "DELETE",
             f"https://api.x.com/2/users/{x_user_id}/muting/{target_user_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def get_x_liked_posts(user_id: str, max_results: int = 100, pagination_token: str | None = None) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/liked_tweets",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/liked_tweets",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    for post in payload.get("data", []) or []:
+        _upsert_x_post(post)
+
+    includes = payload.get("includes", {})
+    for post in includes.get("tweets", []) or []:
+        _upsert_x_post(post)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_liking_users(
+    post_id: str,
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/tweets/{post_id}/liking_users",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/tweets/{post_id}/liking_users",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    for user in payload.get("data", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def like_x_post(post_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/users/me/likes",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.post,
+        f"https://api.x.com/2/users/{x_user_id}/likes",
+        json={"tweet_id": str(post_id)},
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            f"https://api.x.com/2/users/{x_user_id}/likes",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def unlike_x_post(post_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "DELETE",
+            "https://api.x.com/2/users/me/likes",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.delete,
+        f"https://api.x.com/2/users/{x_user_id}/likes/{post_id}",
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "DELETE",
+            f"https://api.x.com/2/users/{x_user_id}/likes/{post_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def create_x_post(payload: Mapping[str, Any]) -> Any:
+    response = call_x_api_with_refresh(
+        requests.post,
+        "https://api.x.com/2/tweets",
+        json=payload,
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/tweets",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def delete_x_post(post_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.delete,
+        f"https://api.x.com/2/tweets/{post_id}",
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "DELETE",
+            f"https://api.x.com/2/tweets/{post_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def repost_x_post(post_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/users/me/retweets",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.post,
+        f"https://api.x.com/2/users/{x_user_id}/retweets",
+        json={"tweet_id": str(post_id)},
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            f"https://api.x.com/2/users/{x_user_id}/retweets",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def unrepost_x_post(post_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "DELETE",
+            "https://api.x.com/2/users/me/retweets",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.delete,
+        f"https://api.x.com/2/users/{x_user_id}/retweets/{post_id}",
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "DELETE",
+            f"https://api.x.com/2/users/{x_user_id}/retweets/{post_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def get_x_reposts_of_me(
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        "https://api.x.com/2/users/reposts_of_me",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+            "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+            "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+            "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+            "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            "https://api.x.com/2/users/reposts_of_me",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_quote_tweets(
+    post_id: str,
+    max_results: int = 10,
+    pagination_token: str | None = None,
+    exclude: list[str] | None = None,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    params = {
+        "max_results": max_results,
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+        "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+        "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+    }
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+    if exclude:
+        params["exclude"] = ",".join(exclude)
+
+    response = requests.get(
+        f"https://api.x.com/2/tweets/{post_id}/quote_tweets",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_post_by_id(post_id: str) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    response = requests.get(
+        f"https://api.x.com/2/tweets/{post_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        params={
+            "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+            "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+            "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+            "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+            "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+        },
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_posts_by_ids(post_ids: list[str]) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    response = requests.get(
+        "https://api.x.com/2/tweets",
+        headers={"Authorization": f"Bearer {token}"},
+        params={
+            "ids": ",".join(post_ids),
+            "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+            "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+            "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+            "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+            "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+        },
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def search_x_posts_recent(
+    query: str,
+    max_results: int = 10,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    since_id: str | None = None,
+    until_id: str | None = None,
+    next_token: str | None = None,
+    pagination_token: str | None = None,
+    sort_order: str | None = None,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    params = {
+        "query": query,
+        "max_results": max_results,
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+        "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+        "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+    }
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+    if since_id:
+        params["since_id"] = since_id
+    if until_id:
+        params["until_id"] = until_id
+    if next_token:
+        params["next_token"] = next_token
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+    if sort_order:
+        params["sort_order"] = sort_order
+
+    response = requests.get(
+        "https://api.x.com/2/tweets/search/recent",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def search_x_posts_all(
+    query: str,
+    max_results: int = 10,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    since_id: str | None = None,
+    until_id: str | None = None,
+    next_token: str | None = None,
+    pagination_token: str | None = None,
+    sort_order: str | None = None,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    params = {
+        "query": query,
+        "max_results": max_results,
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+        "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+        "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+    }
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+    if since_id:
+        params["since_id"] = since_id
+    if until_id:
+        params["until_id"] = until_id
+    if next_token:
+        params["next_token"] = next_token
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+    if sort_order:
+        params["sort_order"] = sort_order
+
+    response = requests.get(
+        "https://api.x.com/2/tweets/search/all",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_posts_counts_recent(
+    query: str,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    since_id: str | None = None,
+    until_id: str | None = None,
+    granularity: str | None = None,
+    next_token: str | None = None,
+    pagination_token: str | None = None,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    params = {
+        "query": query,
+        "search_count.fields": ",".join(_filter_fields(SEARCH_COUNT_FIELDS)),
+    }
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+    if since_id:
+        params["since_id"] = since_id
+    if until_id:
+        params["until_id"] = until_id
+    if granularity:
+        params["granularity"] = granularity
+    if next_token:
+        params["next_token"] = next_token
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+
+    response = requests.get(
+        "https://api.x.com/2/tweets/counts/recent",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    db.session.commit()
+    return response
+
+
+def get_x_posts_counts_all(
+    query: str,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    since_id: str | None = None,
+    until_id: str | None = None,
+    granularity: str | None = None,
+    next_token: str | None = None,
+    pagination_token: str | None = None,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    params = {
+        "query": query,
+        "search_count.fields": ",".join(_filter_fields(SEARCH_COUNT_FIELDS)),
+    }
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+    if since_id:
+        params["since_id"] = since_id
+    if until_id:
+        params["until_id"] = until_id
+    if granularity:
+        params["granularity"] = granularity
+    if next_token:
+        params["next_token"] = next_token
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+
+    response = requests.get(
+        "https://api.x.com/2/tweets/counts/all",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    db.session.commit()
+    return response
+
+
+def get_x_user_posts(
+    user_id: str,
+    max_results: int = 10,
+    pagination_token: str | None = None,
+    since_id: str | None = None,
+    until_id: str | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    exclude: list[str] | None = None,
+) -> Any:
+    params = {
+        "max_results": max_results,
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+        "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+        "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+    }
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+    if since_id:
+        params["since_id"] = since_id
+    if until_id:
+        params["until_id"] = until_id
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+    if exclude:
+        params["exclude"] = ",".join(exclude)
+
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/tweets",
+        params=params,
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/tweets",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_user_mentions(
+    user_id: str,
+    max_results: int = 10,
+    pagination_token: str | None = None,
+    since_id: str | None = None,
+    until_id: str | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+) -> Any:
+    params = {
+        "max_results": max_results,
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+        "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+        "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+    }
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+    if since_id:
+        params["since_id"] = since_id
+    if until_id:
+        params["until_id"] = until_id
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/mentions",
+        params=params,
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/mentions",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_home_timeline(
+    user_id: str,
+    max_results: int = 20,
+    pagination_token: str | None = None,
+    since_id: str | None = None,
+    until_id: str | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    exclude: list[str] | None = None,
+) -> Any:
+    params = {
+        "max_results": max_results,
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+        "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+        "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+    }
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+    if since_id:
+        params["since_id"] = since_id
+    if until_id:
+        params["until_id"] = until_id
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+    if exclude:
+        params["exclude"] = ",".join(exclude)
+
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/timelines/reverse_chronological",
+        params=params,
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/timelines/reverse_chronological",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_community_by_id(community_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/communities/{community_id}",
+        params={"community.fields": ",".join(_filter_fields(COMMUNITY_FIELDS))},
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/communities/{community_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def search_x_communities(
+    query: str,
+    max_results: int = 10,
+    next_token: str | None = None,
+    pagination_token: str | None = None,
+) -> Any:
+    params = {
+        "query": query,
+        "max_results": max_results,
+        "community.fields": ",".join(_filter_fields(COMMUNITY_FIELDS)),
+    }
+    if next_token:
+        params["next_token"] = next_token
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+
+    response = call_x_api_with_refresh(
+        requests.get,
+        "https://api.x.com/2/communities/search",
+        params=params,
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            "https://api.x.com/2/communities/search",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_trends_by_woeid(woeid: int, max_trends: int = 20) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        print("Missing X_BEARER_TOKEN; update .env or app_vars before calling.")
+        return None
+
+    response = requests.get(
+        f"https://api.x.com/2/trends/by/woeid/{woeid}",
+        headers={"Authorization": f"Bearer {token}"},
+        params={
+            "max_trends": max_trends,
+            "trend.fields": ",".join(_filter_fields(TREND_FIELDS)),
+        },
+        timeout=10,
+    )
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_trend_snapshots(payload.get("data", []) or [], "woeid", woeid=woeid)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_personalized_trends() -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        "https://api.x.com/2/users/personalized_trends",
+        params={
+            "personalized_trend.fields": ",".join(_filter_fields(PERSONALIZED_TREND_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            "https://api.x.com/2/users/personalized_trends",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_trend_snapshots(payload.get("data", []) or [], "personalized", woeid=None)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _store_usage_snapshot(
+    usage: Mapping[str, Any],
+    days: int,
+    hours: int | None = None,
+    user_id: int | None = None,
+) -> None:
+    if user_id is None:
+        user_id = session.get("user_id")
+    if not user_id:
+        return
+    snapshot = XUsageSnapshot(
+        user_id=user_id,
+        days=days,
+        hours=hours,
+        cap_reset_day=usage.get("cap_reset_day"),
+        project_cap=_safe_int(usage.get("project_cap")),
+        project_id=str(usage.get("project_id")) if usage.get("project_id") else None,
+        project_usage=_safe_int(usage.get("project_usage")),
+        daily_project_usage=usage.get("daily_project_usage"),
+        daily_client_app_usage=usage.get("daily_client_app_usage"),
+        raw_usage_data=usage,
+    )
+    db.session.add(snapshot)
+
+
+def get_x_news_by_id(news_id: str) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    response = requests.get(
+        f"https://api.x.com/2/news/{news_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"news.fields": ",".join(_filter_fields(NEWS_FIELDS))},
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_news_snapshots([payload["data"]], "id")
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def create_x_activity_subscription(
+    event_type: str,
+    filter_payload: Mapping[str, Any],
+    tag: str | None = None,
+    webhook_id: str | None = None,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    body = {"event_type": event_type, "filter": filter_payload}
+    if tag:
+        body["tag"] = tag
+    if webhook_id:
+        body["webhook_id"] = webhook_id
+
+    response = requests.post(
+        "https://api.x.com/2/activity/subscriptions",
+        headers={"Authorization": f"Bearer {token}"},
+        json=body,
+        timeout=10,
+    )
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    db.session.commit()
+    return response
+
+
+def get_x_activity_subscriptions() -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    response = requests.get(
+        "https://api.x.com/2/activity/subscriptions",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    db.session.commit()
+    return response
+
+
+def update_x_activity_subscription(
+    subscription_id: str,
+    tag: str | None = None,
+    webhook_id: str | None = None,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    body: dict[str, Any] = {}
+    if tag:
+        body["tag"] = tag
+    if webhook_id:
+        body["webhook_id"] = webhook_id
+
+    response = requests.put(
+        f"https://api.x.com/2/activity/subscriptions/{subscription_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json=body,
+        timeout=10,
+    )
+    _log_api_request(
+        "PUT",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    db.session.commit()
+    return response
+
+
+def delete_x_activity_subscription(subscription_id: str) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    response = requests.delete(
+        f"https://api.x.com/2/activity/subscriptions/{subscription_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=10,
+    )
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    db.session.commit()
+    return response
+
+
+def get_x_usage_tweets(days: int = 1, hours: int | None = None) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    response = requests.get(
+        "https://api.x.com/2/usage/tweets",
+        headers={"Authorization": f"Bearer {token}"},
+        params={
+            "days": days,
+            "usage.fields": ",".join(_filter_fields(USAGE_FIELDS)),
+        },
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_usage_snapshot(payload.get("data", {}), days=days, hours=hours)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def search_x_news(
+    query: str,
+    max_results: int = 10,
+    max_age_hours: int = 168,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    response = requests.get(
+        "https://api.x.com/2/news/search",
+        headers={"Authorization": f"Bearer {token}"},
+        params={
+            "query": query,
+            "max_results": max_results,
+            "max_age_hours": max_age_hours,
+            "news.fields": ",".join(_filter_fields(NEWS_FIELDS)),
+        },
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_news_snapshots(payload.get("data", []) or [], "search")
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_list_by_id(list_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/lists/{list_id}",
+        params={
+            "list.fields": ",".join(_filter_fields(LIST_FIELDS)),
+            "expansions": ",".join(_filter_fields(LIST_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/lists/{list_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    includes = payload.get("includes", {})
+    for user in includes.get("users", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_user_followed_lists(
+    user_id: str,
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/followed_lists",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "list.fields": ",".join(_filter_fields(LIST_FIELDS)),
+            "expansions": ",".join(_filter_fields(LIST_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/followed_lists",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    includes = payload.get("includes", {})
+    for user in includes.get("users", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_user_owned_lists(
+    user_id: str,
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/owned_lists",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "list.fields": ",".join(_filter_fields(LIST_FIELDS)),
+            "expansions": ",".join(_filter_fields(LIST_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/owned_lists",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    includes = payload.get("includes", {})
+    for user in includes.get("users", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_user_list_memberships(
+    user_id: str,
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/list_memberships",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "list.fields": ",".join(_filter_fields(LIST_FIELDS)),
+            "expansions": ",".join(_filter_fields(LIST_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/list_memberships",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    includes = payload.get("includes", {})
+    for user in includes.get("users", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_list_tweets(
+    list_id: str,
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/lists/{list_id}/tweets",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+            "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/lists/{list_id}/tweets",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    for post in payload.get("data", []) or []:
+        _upsert_x_post(post)
+
+    includes = payload.get("includes", {})
+    for post in includes.get("tweets", []) or []:
+        _upsert_x_post(post)
+    for user in includes.get("users", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_list_followers(
+    list_id: str,
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/lists/{list_id}/followers",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/lists/{list_id}/followers",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    for user in payload.get("data", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_list_members(
+    list_id: str,
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/lists/{list_id}/members",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/lists/{list_id}/members",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    for user in payload.get("data", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def create_x_list(name: str, description: str | None = None, private: bool = False) -> Any:
+    payload = {"name": name}
+    if description:
+        payload["description"] = description
+    payload["private"] = bool(private)
+
+    response = call_x_api_with_refresh(
+        requests.post,
+        "https://api.x.com/2/lists",
+        json=payload,
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/lists",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def update_x_list(
+    list_id: str,
+    name: str | None = None,
+    description: str | None = None,
+    private: bool | None = None,
+) -> Any:
+    payload = {}
+    if name:
+        payload["name"] = name
+    if description is not None:
+        payload["description"] = description
+    if private is not None:
+        payload["private"] = bool(private)
+
+    response = call_x_api_with_refresh(
+        requests.put,
+        f"https://api.x.com/2/lists/{list_id}",
+        json=payload,
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "PUT",
+            f"https://api.x.com/2/lists/{list_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "PUT",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def delete_x_list(list_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.delete,
+        f"https://api.x.com/2/lists/{list_id}",
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "DELETE",
+            f"https://api.x.com/2/lists/{list_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def follow_x_list(list_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/users/me/followed_lists",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.post,
+        f"https://api.x.com/2/users/{x_user_id}/followed_lists",
+        json={"list_id": str(list_id)},
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            f"https://api.x.com/2/users/{x_user_id}/followed_lists",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def unfollow_x_list(list_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "DELETE",
+            "https://api.x.com/2/users/me/followed_lists",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.delete,
+        f"https://api.x.com/2/users/{x_user_id}/followed_lists/{list_id}",
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "DELETE",
+            f"https://api.x.com/2/users/{x_user_id}/followed_lists/{list_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def add_x_list_member(list_id: str, user_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.post,
+        f"https://api.x.com/2/lists/{list_id}/members",
+        json={"user_id": str(user_id)},
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            f"https://api.x.com/2/lists/{list_id}/members",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def remove_x_list_member(list_id: str, user_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.delete,
+        f"https://api.x.com/2/lists/{list_id}/members/{user_id}",
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "DELETE",
+            f"https://api.x.com/2/lists/{list_id}/members/{user_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def get_x_user_pinned_lists(user_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/pinned_lists",
+        params={
+            "list.fields": ",".join(_filter_fields(LIST_FIELDS)),
+            "expansions": ",".join(_filter_fields(LIST_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/pinned_lists",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    includes = payload.get("includes", {})
+    for user in includes.get("users", []) or []:
+        _upsert_x_user(user)
+
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def pin_x_list(list_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/users/me/pinned_lists",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.post,
+        f"https://api.x.com/2/users/{x_user_id}/pinned_lists",
+        json={"list_id": str(list_id)},
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            f"https://api.x.com/2/users/{x_user_id}/pinned_lists",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def unpin_x_list(list_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "DELETE",
+            "https://api.x.com/2/users/me/pinned_lists",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.delete,
+        f"https://api.x.com/2/users/{x_user_id}/pinned_lists/{list_id}",
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "DELETE",
+            f"https://api.x.com/2/users/{x_user_id}/pinned_lists/{list_id}",
             None,
             json.dumps(response),
             None,

@@ -1,0 +1,1129 @@
+{% extends "base.html" %}
+
+{% block title %}X Lists{% endblock %}
+
+{% block content %}
+
+<style>
+  .x-card {
+    border: 0;
+    border-radius: 1rem;
+    position: relative;
+    overflow: hidden;
+  }
+  .x-muted { color: rgba(0,0,0,.60); }
+  .x-pill {
+    border: 1px solid rgba(0,0,0,.10);
+    border-radius: 999px;
+    padding: .35rem .65rem;
+    font-size: .85rem;
+    background: #fff;
+  }
+  .x-kpi {
+    border: 1px solid rgba(0,0,0,.08);
+    border-radius: .9rem;
+    padding: .85rem .9rem;
+    background: #fff;
+  }
+  .x-kpi .label { font-size: .8rem; color: rgba(0,0,0,.55); }
+  .x-kpi .value { font-size: 1.15rem; font-weight: 700; line-height: 1.1; }
+
+  pre.x-pre {
+    max-height: 340px;
+    overflow: auto;
+    background: #0b1020;
+    color: #d7e2ff;
+    border-radius: .75rem;
+    padding: 1rem;
+    font-size: .85rem;
+    margin: 0;
+  }
+</style>
+
+<div class="container-fluid py-4">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 1080;">
+        {% for category, message in messages %}
+          <div class="toast text-bg-{{ category }} border-0 mb-2" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="d-flex">
+              <div class="toast-body">{{ message }}</div>
+              <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <div class="d-flex align-items-end justify-content-between mb-3">
+    <div>
+      <h3 class="mb-1">X Lists</h3>
+      <div class="x-muted">Explore and manage Lists from your linked X account.</div>
+    </div>
+  </div>
+
+  <div class="row g-4">
+    {# LEFT: Controls #}
+    <div class="col-lg-5">
+      <div class="card x-card shadow-sm">
+        <div class="card-body p-3 p-md-4">
+          <div class="d-flex align-items-center justify-content-between mb-3">
+            <div>
+              <h5 class="mb-1">Lists toolbox</h5>
+              <div class="x-muted small">Pick an action below.</div>
+            </div>
+            <span class="badge text-bg-light border">X API</span>
+          </div>
+
+          {% if known_limit %}
+            <div class="alert alert-warning d-flex align-items-start gap-2 mb-3">
+              <div class="fw-semibold">Known limitation:</div>
+              <div class="flex-grow-1">{{ known_limit }}</div>
+            </div>
+          {% endif %}
+          {% if error %}
+            <div class="alert alert-warning d-flex align-items-start gap-2 mb-3">
+              <div class="fw-semibold">Heads up:</div>
+              <div class="flex-grow-1">{{ error }}</div>
+            </div>
+          {% endif %}
+
+          <div class="accordion" id="listsAccordion">
+            {# Get List by ID #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hListById">
+                <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#cListById" aria-expanded="true" aria-controls="cListById">
+                  Get List by ID
+                </button>
+              </h2>
+              <div id="cListById" class="accordion-collapse collapse show" aria-labelledby="hListById" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">List ID</label>
+                    <div class="input-group">
+                      <input
+                        type="text"
+                        name="list_id"
+                        value="{{ list_id or '' }}"
+                        class="form-control"
+                        placeholder="1146654567674912769"
+                        required
+                      >
+                      <button class="btn btn-outline-dark" type="submit" name="lists_action" value="list_by_id">Lookup</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# Followed Lists #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hFollowedLists">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cFollowedLists" aria-expanded="false" aria-controls="cFollowedLists">
+                  Get followed Lists
+                </button>
+              </h2>
+              <div id="cFollowedLists" class="accordion-collapse collapse" aria-labelledby="hFollowedLists" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">User ID or username</label>
+                    <input
+                      type="text"
+                      name="followed_user_identifier"
+                      value="{{ followed_user_identifier or '' }}"
+                      class="form-control"
+                      placeholder="@tapfornerd or 2244994945"
+                    >
+                    <div class="mt-2">
+                      <label class="form-label small x-muted mb-1">Or pick an existing user</label>
+                      <select class="form-select" name="followed_user_select" id="followedUserSelect">
+                        <option value="">Select a user from the database</option>
+                        {% for user in existing_users %}
+                          <option value="{{ user.id }}" {% if followed_user_select == (user.id | string) %}selected{% endif %}>
+                            @{{ user.username }}{% if user.name %} · {{ user.name }}{% endif %} ({{ user.id }})
+                          </option>
+                        {% endfor %}
+                      </select>
+                    </div>
+                    <div class="row g-2 mt-2">
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Max results</label>
+                        <input type="number" name="followed_max_results" min="1" max="100" class="form-control" value="{{ followed_max_results or '' }}" placeholder="100">
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Pagination token (optional)</label>
+                        <input type="text" name="followed_pagination_token" class="form-control" value="{{ followed_pagination_token or '' }}" placeholder="pagination_token">
+                      </div>
+                    </div>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                    <button class="btn btn-outline-dark mt-2" type="submit" name="lists_action" value="followed_lists">Get followed Lists</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# Owned Lists #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hOwnedLists">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cOwnedLists" aria-expanded="false" aria-controls="cOwnedLists">
+                  Get owned Lists
+                </button>
+              </h2>
+              <div id="cOwnedLists" class="accordion-collapse collapse" aria-labelledby="hOwnedLists" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">User ID or username</label>
+                    <input
+                      type="text"
+                      name="owned_user_identifier"
+                      value="{{ owned_user_identifier or '' }}"
+                      class="form-control"
+                      placeholder="@tapfornerd or 2244994945"
+                    >
+                    <div class="mt-2">
+                      <label class="form-label small x-muted mb-1">Or pick an existing user</label>
+                      <select class="form-select" name="owned_user_select" id="ownedUserSelect">
+                        <option value="">Select a user from the database</option>
+                        {% for user in existing_users %}
+                          <option value="{{ user.id }}" {% if owned_user_select == (user.id | string) %}selected{% endif %}>
+                            @{{ user.username }}{% if user.name %} · {{ user.name }}{% endif %} ({{ user.id }})
+                          </option>
+                        {% endfor %}
+                      </select>
+                    </div>
+                    <div class="row g-2 mt-2">
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Max results</label>
+                        <input type="number" name="owned_max_results" min="1" max="100" class="form-control" value="{{ owned_max_results or '' }}" placeholder="100">
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Pagination token (optional)</label>
+                        <input type="text" name="owned_pagination_token" class="form-control" value="{{ owned_pagination_token or '' }}" placeholder="pagination_token">
+                      </div>
+                    </div>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                    <button class="btn btn-outline-dark mt-2" type="submit" name="lists_action" value="owned_lists">Get owned Lists</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# List memberships #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hListMemberships">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cListMemberships" aria-expanded="false" aria-controls="cListMemberships">
+                  Get List memberships
+                </button>
+              </h2>
+              <div id="cListMemberships" class="accordion-collapse collapse" aria-labelledby="hListMemberships" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">User ID or username</label>
+                    <input
+                      type="text"
+                      name="membership_user_identifier"
+                      value="{{ membership_user_identifier or '' }}"
+                      class="form-control"
+                      placeholder="@tapfornerd or 2244994945"
+                    >
+                    <div class="mt-2">
+                      <label class="form-label small x-muted mb-1">Or pick an existing user</label>
+                      <select class="form-select" name="membership_user_select" id="membershipUserSelect">
+                        <option value="">Select a user from the database</option>
+                        {% for user in existing_users %}
+                          <option value="{{ user.id }}" {% if membership_user_select == (user.id | string) %}selected{% endif %}>
+                            @{{ user.username }}{% if user.name %} · {{ user.name }}{% endif %} ({{ user.id }})
+                          </option>
+                        {% endfor %}
+                      </select>
+                    </div>
+                    <div class="row g-2 mt-2">
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Max results</label>
+                        <input type="number" name="membership_max_results" min="1" max="100" class="form-control" value="{{ membership_max_results or '' }}" placeholder="100">
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Pagination token (optional)</label>
+                        <input type="text" name="membership_pagination_token" class="form-control" value="{{ membership_pagination_token or '' }}" placeholder="pagination_token">
+                      </div>
+                    </div>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                    <button class="btn btn-outline-dark mt-2" type="submit" name="lists_action" value="list_memberships">Get memberships</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# List posts #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hListPosts">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cListPosts" aria-expanded="false" aria-controls="cListPosts">
+                  Get List Posts
+                </button>
+              </h2>
+              <div id="cListPosts" class="accordion-collapse collapse" aria-labelledby="hListPosts" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">List ID</label>
+                    <input
+                      type="text"
+                      name="list_tweets_id"
+                      value="{{ list_tweets_id or '' }}"
+                      class="form-control"
+                      placeholder="1146654567674912769"
+                    >
+                    <div class="row g-2 mt-2">
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Max results</label>
+                        <input type="number" name="list_tweets_max_results" min="1" max="100" class="form-control" value="{{ list_tweets_max_results or '' }}" placeholder="100">
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Pagination token (optional)</label>
+                        <input type="text" name="list_tweets_pagination_token" class="form-control" value="{{ list_tweets_pagination_token or '' }}" placeholder="pagination_token">
+                      </div>
+                    </div>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                    <button class="btn btn-outline-dark mt-2" type="submit" name="lists_action" value="list_tweets">Get List Posts</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# List followers #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hListFollowers">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cListFollowers" aria-expanded="false" aria-controls="cListFollowers">
+                  Get List followers
+                </button>
+              </h2>
+              <div id="cListFollowers" class="accordion-collapse collapse" aria-labelledby="hListFollowers" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">List ID</label>
+                    <input
+                      type="text"
+                      name="list_followers_id"
+                      value="{{ list_followers_id or '' }}"
+                      class="form-control"
+                      placeholder="1146654567674912769"
+                    >
+                    <div class="row g-2 mt-2">
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Max results</label>
+                        <input type="number" name="list_followers_max_results" min="1" max="100" class="form-control" value="{{ list_followers_max_results or '' }}" placeholder="100">
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Pagination token (optional)</label>
+                        <input type="text" name="list_followers_pagination_token" class="form-control" value="{{ list_followers_pagination_token or '' }}" placeholder="pagination_token">
+                      </div>
+                    </div>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                    <button class="btn btn-outline-dark mt-2" type="submit" name="lists_action" value="list_followers">Get followers</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# List members #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hListMembers">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cListMembers" aria-expanded="false" aria-controls="cListMembers">
+                  Get List members
+                </button>
+              </h2>
+              <div id="cListMembers" class="accordion-collapse collapse" aria-labelledby="hListMembers" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">List ID</label>
+                    <input
+                      type="text"
+                      name="list_members_id"
+                      value="{{ list_members_id or '' }}"
+                      class="form-control"
+                      placeholder="1146654567674912769"
+                    >
+                    <div class="row g-2 mt-2">
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Max results</label>
+                        <input type="number" name="list_members_max_results" min="1" max="100" class="form-control" value="{{ list_members_max_results or '' }}" placeholder="100">
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Pagination token (optional)</label>
+                        <input type="text" name="list_members_pagination_token" class="form-control" value="{{ list_members_pagination_token or '' }}" placeholder="pagination_token">
+                      </div>
+                    </div>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                    <button class="btn btn-outline-dark mt-2" type="submit" name="lists_action" value="list_members">Get members</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# Create list #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hCreateList">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cCreateList" aria-expanded="false" aria-controls="cCreateList">
+                  Create List
+                </button>
+              </h2>
+              <div id="cCreateList" class="accordion-collapse collapse" aria-labelledby="hCreateList" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">Name</label>
+                    <input
+                      type="text"
+                      name="list_create_name"
+                      value="{{ list_create_name or '' }}"
+                      class="form-control"
+                      placeholder="My List"
+                    >
+                    <label class="form-label small x-muted mb-1 mt-2">Description</label>
+                    <textarea
+                      name="list_create_description"
+                      class="form-control"
+                      rows="3"
+                      placeholder="Optional description"
+                    >{{ list_create_description or '' }}</textarea>
+                    <div class="form-check mt-2">
+                      <input class="form-check-input" type="checkbox" name="list_create_private" id="listCreatePrivate" {% if list_create_private %}checked{% endif %}>
+                      <label class="form-check-label" for="listCreatePrivate">Private list</label>
+                    </div>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                    <button class="btn btn-outline-dark mt-2" type="submit" name="lists_action" value="create_list">Create list</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# Update list #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hUpdateList">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cUpdateList" aria-expanded="false" aria-controls="cUpdateList">
+                  Update List
+                </button>
+              </h2>
+              <div id="cUpdateList" class="accordion-collapse collapse" aria-labelledby="hUpdateList" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">List ID</label>
+                    <input
+                      type="text"
+                      name="list_update_id"
+                      value="{{ list_update_id or '' }}"
+                      class="form-control"
+                      placeholder="1146654567674912769"
+                    >
+                    <label class="form-label small x-muted mb-1 mt-2">Name (optional)</label>
+                    <input
+                      type="text"
+                      name="list_update_name"
+                      value="{{ list_update_name or '' }}"
+                      class="form-control"
+                      placeholder="Updated name"
+                    >
+                    <label class="form-label small x-muted mb-1 mt-2">Description (optional)</label>
+                    <textarea
+                      name="list_update_description"
+                      class="form-control"
+                      rows="3"
+                      placeholder="Updated description"
+                    >{{ list_update_description or '' }}</textarea>
+                    <label class="form-label small x-muted mb-1 mt-2">Private setting</label>
+                    <select class="form-select" name="list_update_private">
+                      <option value="" {% if list_update_private == "" %}selected{% endif %}>Leave unchanged</option>
+                      <option value="true" {% if list_update_private == "true" %}selected{% endif %}>Set to private</option>
+                      <option value="false" {% if list_update_private == "false" %}selected{% endif %}>Set to public</option>
+                    </select>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                    <button class="btn btn-outline-dark mt-2" type="submit" name="lists_action" value="update_list">Update list</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# Delete list #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hDeleteList">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cDeleteList" aria-expanded="false" aria-controls="cDeleteList">
+                  Delete List
+                </button>
+              </h2>
+              <div id="cDeleteList" class="accordion-collapse collapse" aria-labelledby="hDeleteList" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">List ID</label>
+                    <div class="input-group">
+                      <input
+                        type="text"
+                        name="list_delete_id"
+                        value="{{ list_delete_id or '' }}"
+                        class="form-control"
+                        placeholder="1146654567674912769"
+                      >
+                      <button class="btn btn-outline-danger" type="submit" name="lists_action" value="delete_list">Delete</button>
+                    </div>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# Follow list #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hFollowList">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cFollowList" aria-expanded="false" aria-controls="cFollowList">
+                  Follow List
+                </button>
+              </h2>
+              <div id="cFollowList" class="accordion-collapse collapse" aria-labelledby="hFollowList" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">List ID</label>
+                    <div class="input-group">
+                      <input
+                        type="text"
+                        name="follow_list_id"
+                        value="{{ follow_list_id or '' }}"
+                        class="form-control"
+                        placeholder="1146654567674912769"
+                      >
+                      <button class="btn btn-outline-dark" type="submit" name="lists_action" value="follow_list">Follow</button>
+                    </div>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# Unfollow list #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hUnfollowList">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cUnfollowList" aria-expanded="false" aria-controls="cUnfollowList">
+                  Unfollow List
+                </button>
+              </h2>
+              <div id="cUnfollowList" class="accordion-collapse collapse" aria-labelledby="hUnfollowList" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">List ID</label>
+                    <div class="input-group">
+                      <input
+                        type="text"
+                        name="unfollow_list_id"
+                        value="{{ unfollow_list_id or '' }}"
+                        class="form-control"
+                        placeholder="1146654567674912769"
+                      >
+                      <button class="btn btn-outline-dark" type="submit" name="lists_action" value="unfollow_list">Unfollow</button>
+                    </div>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# Add member #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hAddMember">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cAddMember" aria-expanded="false" aria-controls="cAddMember">
+                  Add List member
+                </button>
+              </h2>
+              <div id="cAddMember" class="accordion-collapse collapse" aria-labelledby="hAddMember" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">List ID</label>
+                    <input
+                      type="text"
+                      name="add_member_list_id"
+                      value="{{ add_member_list_id or '' }}"
+                      class="form-control"
+                      placeholder="1146654567674912769"
+                    >
+                    <label class="form-label small x-muted mb-1 mt-2">User ID or username</label>
+                    <input
+                      type="text"
+                      name="add_member_user_id"
+                      value="{{ add_member_user_id or '' }}"
+                      class="form-control"
+                      placeholder="@tapfornerd or 2244994945"
+                    >
+                    <div class="mt-2">
+                      <label class="form-label small x-muted mb-1">Or pick an existing user</label>
+                      <select class="form-select" name="add_member_user_select" id="addMemberUserSelect">
+                        <option value="">Select a user from the database</option>
+                        {% for user in existing_users %}
+                          <option value="{{ user.id }}" {% if add_member_user_select == (user.id | string) %}selected{% endif %}>
+                            @{{ user.username }}{% if user.name %} · {{ user.name }}{% endif %} ({{ user.id }})
+                          </option>
+                        {% endfor %}
+                      </select>
+                    </div>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                    <button class="btn btn-outline-dark mt-2" type="submit" name="lists_action" value="add_member">Add member</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# Remove member #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hRemoveMember">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cRemoveMember" aria-expanded="false" aria-controls="cRemoveMember">
+                  Remove List member
+                </button>
+              </h2>
+              <div id="cRemoveMember" class="accordion-collapse collapse" aria-labelledby="hRemoveMember" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">List ID</label>
+                    <input
+                      type="text"
+                      name="remove_member_list_id"
+                      value="{{ remove_member_list_id or '' }}"
+                      class="form-control"
+                      placeholder="1146654567674912769"
+                    >
+                    <label class="form-label small x-muted mb-1 mt-2">User ID or username</label>
+                    <input
+                      type="text"
+                      name="remove_member_user_id"
+                      value="{{ remove_member_user_id or '' }}"
+                      class="form-control"
+                      placeholder="@tapfornerd or 2244994945"
+                    >
+                    <div class="mt-2">
+                      <label class="form-label small x-muted mb-1">Or pick an existing user</label>
+                      <select class="form-select" name="remove_member_user_select" id="removeMemberUserSelect">
+                        <option value="">Select a user from the database</option>
+                        {% for user in existing_users %}
+                          <option value="{{ user.id }}" {% if remove_member_user_select == (user.id | string) %}selected{% endif %}>
+                            @{{ user.username }}{% if user.name %} · {{ user.name }}{% endif %} ({{ user.id }})
+                          </option>
+                        {% endfor %}
+                      </select>
+                    </div>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                    <button class="btn btn-outline-dark mt-2" type="submit" name="lists_action" value="remove_member">Remove member</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# Pinned lists #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hPinnedLists">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cPinnedLists" aria-expanded="false" aria-controls="cPinnedLists">
+                  Get pinned Lists
+                </button>
+              </h2>
+              <div id="cPinnedLists" class="accordion-collapse collapse" aria-labelledby="hPinnedLists" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">User ID or username</label>
+                    <input
+                      type="text"
+                      name="pinned_user_identifier"
+                      value="{{ pinned_user_identifier or '' }}"
+                      class="form-control"
+                      placeholder="@tapfornerd or 2244994945"
+                    >
+                    <div class="mt-2">
+                      <label class="form-label small x-muted mb-1">Or pick an existing user</label>
+                      <select class="form-select" name="pinned_user_select" id="pinnedUserSelect">
+                        <option value="">Select a user from the database</option>
+                        {% for user in existing_users %}
+                          <option value="{{ user.id }}" {% if pinned_user_select == (user.id | string) %}selected{% endif %}>
+                            @{{ user.username }}{% if user.name %} · {{ user.name }}{% endif %} ({{ user.id }})
+                          </option>
+                        {% endfor %}
+                      </select>
+                    </div>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                    <button class="btn btn-outline-dark mt-2" type="submit" name="lists_action" value="pinned_lists">Get pinned Lists</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# Pin list #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hPinList">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cPinList" aria-expanded="false" aria-controls="cPinList">
+                  Pin List
+                </button>
+              </h2>
+              <div id="cPinList" class="accordion-collapse collapse" aria-labelledby="hPinList" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">List ID</label>
+                    <div class="input-group">
+                      <input
+                        type="text"
+                        name="pin_list_id"
+                        value="{{ pin_list_id or '' }}"
+                        class="form-control"
+                        placeholder="1146654567674912769"
+                      >
+                      <button class="btn btn-outline-dark" type="submit" name="lists_action" value="pin_list">Pin</button>
+                    </div>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# Unpin list #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hUnpinList">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cUnpinList" aria-expanded="false" aria-controls="cUnpinList">
+                  Unpin List
+                </button>
+              </h2>
+              <div id="cUnpinList" class="accordion-collapse collapse" aria-labelledby="hUnpinList" data-bs-parent="#listsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">List ID</label>
+                    <div class="input-group">
+                      <input
+                        type="text"
+                        name="unpin_list_id"
+                        value="{{ unpin_list_id or '' }}"
+                        class="form-control"
+                        placeholder="1146654567674912769"
+                      >
+                      <button class="btn btn-outline-dark" type="submit" name="lists_action" value="unpin_list">Unpin</button>
+                    </div>
+                    <div class="form-text mt-2">Requires OAuth user token.</div>
+                  </form>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {% if result %}
+            <hr class="my-4">
+
+            <div class="row g-2">
+              <div class="col-12">
+                <button
+                  class="btn btn-link text-decoration-none p-0"
+                  type="button"
+                  data-bs-toggle="collapse"
+                  data-bs-target="#rawResponse"
+                  aria-expanded="false"
+                  aria-controls="rawResponse"
+                >
+                  View raw X API response
+                </button>
+              </div>
+              <div class="col-12">
+                <div id="rawResponse" class="collapse mt-2">
+                  <pre class="x-pre">{{ result | tojson(indent=2) }}</pre>
+                </div>
+              </div>
+            </div>
+
+            {% if token_scope %}
+              <div class="form-text mt-2">Token scopes: {{ token_scope }}</div>
+            {% endif %}
+
+            {% if curl_preview %}
+              <div class="row g-2 mt-3">
+                <div class="col-12 d-flex align-items-center justify-content-between">
+                  <button
+                    class="btn btn-link text-decoration-none p-0"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#curlPreview"
+                    aria-expanded="false"
+                    aria-controls="curlPreview"
+                  >
+                    View sanitized curl command
+                  </button>
+                  <button
+                    class="btn btn-sm btn-outline-dark"
+                    type="button"
+                    data-copy-target="#curlPreviewBox"
+                    onclick="
+                      const el = document.querySelector(this.getAttribute('data-copy-target'));
+                      if (!el) return;
+                      const text = el.textContent || '';
+                      navigator.clipboard.writeText(text);
+                      const original = this.textContent;
+                      this.textContent = 'Copied!';
+                      setTimeout(() => this.textContent = original, 1200);
+                    "
+                  >
+                    Copy curl
+                  </button>
+                </div>
+                <div class="col-12">
+                  <div id="curlPreview" class="collapse mt-2">
+                    <textarea
+                      id="curlPreviewBox"
+                      class="form-control font-monospace"
+                      rows="6"
+                      style="width: 100%; resize: vertical;"
+                      readonly
+                    >{{ curl_preview }}</textarea>
+                    <div class="form-text">
+                      Sanitized curl is safe to share. Click “Copy curl” to copy the full command.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            {% endif %}
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    {# RIGHT: Results #}
+    <div class="col-lg-7">
+      {% if result %}
+        {% set action_result = None %}
+        {% set list_items = [] %}
+        {% set users = [] %}
+        {% set posts = [] %}
+
+        {% if result.data is mapping %}
+          {% if result.data.updated is defined or result.data.deleted is defined or result.data.following is defined or result.data.is_member is defined or result.data.pinned is defined %}
+            {% set action_result = result.data %}
+          {% elif result.data.id is defined and result.data.name is defined %}
+            {% set list_items = [result.data] %}
+          {% endif %}
+        {% elif result.data is sequence %}
+          {% set first_item = result.data[0] if result.data|length > 0 else None %}
+          {% if first_item and first_item.text is defined %}
+            {% set posts = result.data %}
+          {% elif first_item and first_item.username is defined %}
+            {% set users = result.data %}
+          {% elif first_item and first_item.name is defined %}
+            {% set list_items = result.data %}
+          {% endif %}
+        {% endif %}
+
+        <div class="row g-4">
+          {% if action_result %}
+            <div class="col-12">
+              <div class="card x-card shadow-sm">
+                <div class="card-body text-center">
+                  <div class="x-muted small mb-1">Action result</div>
+                  <div class="d-flex flex-wrap justify-content-center gap-2">
+                    {% if action_result.updated is defined %}
+                      <span class="x-pill">Updated: {{ "true" if action_result.updated else "false" }}</span>
+                    {% endif %}
+                    {% if action_result.deleted is defined %}
+                      <span class="x-pill">Deleted: {{ "true" if action_result.deleted else "false" }}</span>
+                    {% endif %}
+                    {% if action_result.following is defined %}
+                      <span class="x-pill">Following: {{ "true" if action_result.following else "false" }}</span>
+                    {% endif %}
+                    {% if action_result.is_member is defined %}
+                      <span class="x-pill">Is member: {{ "true" if action_result.is_member else "false" }}</span>
+                    {% endif %}
+                    {% if action_result.pinned is defined %}
+                      <span class="x-pill">Pinned: {{ "true" if action_result.pinned else "false" }}</span>
+                    {% endif %}
+                  </div>
+                </div>
+              </div>
+            </div>
+          {% endif %}
+
+          {% if result.meta is mapping %}
+            <div class="col-12">
+              <div class="card x-card shadow-sm">
+                <div class="card-body">
+                  <div class="x-muted small mb-2">Response metadata</div>
+                  <div class="row g-3">
+                    <div class="col-6 col-md-4">
+                      <div class="x-kpi">
+                        <div class="label">Result count</div>
+                        <div class="value">{{ result.meta.result_count | default(0) }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-4">
+                      <div class="x-kpi">
+                        <div class="label">Next token</div>
+                        <div class="value">{{ result.meta.next_token | default("—") }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-4">
+                      <div class="x-kpi">
+                        <div class="label">Previous token</div>
+                        <div class="value">{{ result.meta.previous_token | default("—") }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          {% endif %}
+
+          {% if list_items|length == 0 and users|length == 0 and posts|length == 0 and not action_result %}
+            <div class="col-12">
+              <div class="card x-card shadow-sm">
+                <div class="card-body text-center text-muted">
+                  No results returned for this request.
+                </div>
+              </div>
+            </div>
+          {% endif %}
+
+          {% for list_item in list_items %}
+            <div class="col-12">
+              <div class="card x-card shadow-sm">
+                <div class="card-body">
+                  <div class="d-flex align-items-start justify-content-between">
+                    <div class="pe-3">
+                      <div class="x-muted small mb-2">List</div>
+                      <h4 class="mb-2">{{ list_item.name or "Untitled List" }}</h4>
+                      <div class="d-flex flex-wrap gap-2">
+                        <span class="x-pill">ID: {{ list_item.id }}</span>
+                        {% if list_item.owner_id %}
+                          <span class="x-pill">Owner: {{ list_item.owner_id }}</span>
+                        {% endif %}
+                        {% if list_item.created_at %}
+                          <span class="x-pill">{{ list_item.created_at }}</span>
+                        {% endif %}
+                      </div>
+                      {% if list_item.description %}
+                        <p class="mt-3 mb-0 x-muted">{{ list_item.description }}</p>
+                      {% endif %}
+                    </div>
+                    <div class="d-flex flex-column gap-2" style="min-width: 140px;">
+                      <a
+                        class="btn btn-dark"
+                        target="_blank"
+                        rel="noopener"
+                        href="https://x.com/i/lists/{{ list_item.id }}"
+                      >
+                        Open on X
+                      </a>
+                      <button class="btn btn-outline-dark" type="button"
+                        onclick="navigator.clipboard.writeText('{{ list_item.id }}')"
+                      >
+                        Copy ID
+                      </button>
+                    </div>
+                  </div>
+
+                  <hr class="my-4">
+
+                  <div class="row g-3">
+                    <div class="col-6 col-md-4">
+                      <div class="x-kpi">
+                        <div class="label">Members</div>
+                        <div class="value">{{ list_item.member_count | default(0) }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-4">
+                      <div class="x-kpi">
+                        <div class="label">Followers</div>
+                        <div class="value">{{ list_item.follower_count | default(0) }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-4">
+                      <div class="x-kpi">
+                        <div class="label">Private</div>
+                        <div class="value">
+                          {% if list_item.private is defined %}
+                            {{ "yes" if list_item.private else "no" }}
+                          {% else %}
+                            —
+                          {% endif %}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          {% endfor %}
+
+          {% for post in posts %}
+            {% set metrics = post.public_metrics if post.public_metrics is defined else {} %}
+            <div class="col-12">
+              <div class="card x-card shadow-sm">
+                <div class="card-body">
+                  <div class="d-flex align-items-start justify-content-between">
+                    <div class="pe-3">
+                      <div class="x-muted small mb-2">Post</div>
+                      <div class="fw-semibold mb-2">{{ post.text or "No text available." }}</div>
+                      <div class="d-flex flex-wrap gap-2">
+                        <span class="x-pill">ID: {{ post.id }}</span>
+                        {% if post.created_at %}
+                          <span class="x-pill">{{ post.created_at }}</span>
+                        {% endif %}
+                        {% if post.author_id %}
+                          <span class="x-pill">Author: {{ post.author_id }}</span>
+                        {% endif %}
+                      </div>
+                    </div>
+                    <div class="d-flex flex-column gap-2" style="min-width: 140px;">
+                      <a
+                        class="btn btn-dark"
+                        target="_blank"
+                        rel="noopener"
+                        href="https://x.com/i/web/status/{{ post.id }}"
+                      >
+                        Open on X
+                      </a>
+                      <button class="btn btn-outline-dark" type="button"
+                        onclick="navigator.clipboard.writeText('{{ post.id }}')"
+                      >
+                        Copy ID
+                      </button>
+                    </div>
+                  </div>
+
+                  <hr class="my-4">
+
+                  <div class="row g-3">
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Likes</div>
+                        <div class="value">{{ metrics.like_count | default(0) }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Replies</div>
+                        <div class="value">{{ metrics.reply_count | default(0) }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Reposts</div>
+                        <div class="value">{{ metrics.retweet_count | default(0) }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Quotes</div>
+                        <div class="value">{{ metrics.quote_count | default(0) }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          {% endfor %}
+
+          {% for user in users %}
+            {% set metrics = user.public_metrics if user.public_metrics is defined else {} %}
+            <div class="col-12">
+              <div class="card x-card shadow-sm">
+                <div class="card-body">
+                  <div class="d-flex align-items-start justify-content-between">
+                    <div class="pe-3">
+                      <h4 class="mb-1">{{ user.name }}</h4>
+                      <div class="d-flex flex-wrap gap-2">
+                        <span class="x-pill">@{{ user.username }}</span>
+                        {% if user.verified %}
+                          <span class="badge text-bg-primary">Verified</span>
+                        {% endif %}
+                        {% if user.location %}
+                          <span class="x-pill">{{ user.location }}</span>
+                        {% endif %}
+                      </div>
+                      {% if user.description %}
+                        <p class="mt-3 mb-0 x-muted">{{ user.description }}</p>
+                      {% endif %}
+                    </div>
+                    <div class="d-flex flex-column gap-2" style="min-width: 140px;">
+                      <a
+                        class="btn btn-dark"
+                        target="_blank"
+                        rel="noopener"
+                        href="https://x.com/{{ user.username }}"
+                      >
+                        Open on X
+                      </a>
+                      <button class="btn btn-outline-dark" type="button"
+                        onclick="navigator.clipboard.writeText('{{ user.id }}')"
+                      >
+                        Copy ID
+                      </button>
+                    </div>
+                  </div>
+
+                  <hr class="my-4">
+
+                  <div class="row g-3">
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Followers</div>
+                        <div class="value">{{ metrics.followers_count | default(0) }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Following</div>
+                        <div class="value">{{ metrics.following_count | default(0) }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Posts</div>
+                        <div class="value">{{ metrics.tweet_count | default(0) }}</div>
+                      </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                      <div class="x-kpi">
+                        <div class="label">Likes</div>
+                        <div class="value">{{ metrics.like_count | default(0) }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="card x-card shadow-sm">
+          <div class="card-body text-center py-5">
+            <div class="display-6 mb-2">📋</div>
+            <div class="fw-semibold">No results yet</div>
+            <div class="x-muted">Run a list action to see results here.</div>
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  document.querySelectorAll('.toast').forEach((toastEl) => {
+    new bootstrap.Toast(toastEl, { delay: 3500 }).show();
+  });
+
+  const pairs = [
+    { selectId: 'followedUserSelect', inputName: 'followed_user_identifier' },
+    { selectId: 'ownedUserSelect', inputName: 'owned_user_identifier' },
+    { selectId: 'membershipUserSelect', inputName: 'membership_user_identifier' },
+    { selectId: 'addMemberUserSelect', inputName: 'add_member_user_id' },
+    { selectId: 'removeMemberUserSelect', inputName: 'remove_member_user_id' },
+    { selectId: 'pinnedUserSelect', inputName: 'pinned_user_identifier' },
+  ];
+
+  pairs.forEach(({ selectId, inputName }) => {
+    const selectEl = document.getElementById(selectId);
+    const inputEl = document.querySelector(`input[name="${inputName}"]`);
+    if (selectEl && inputEl) {
+      selectEl.addEventListener('change', () => {
+        if (selectEl.value) {
+          inputEl.value = selectEl.value;
+        }
+      });
+    }
+  });
+</script>
+{% endblock %}

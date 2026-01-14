@@ -19,10 +19,13 @@ def build_authorize_url(redirect_uri, state, code_challenge):
         "tweet.read",
         "tweet.write",
         "users.read",
+        "like.read",
+        "like.write",
         "mute.read",
         "mute.write",
         "list.read",
         "list.write",
+        "media.write",
         "offline.access",
     ]
     params = {

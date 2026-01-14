@@ -1,0 +1,459 @@
+{% extends "base.html" %}
+
+{% block title %}X Usage{% endblock %}
+
+{% block extra_css %}
+  <link rel="stylesheet" href="https://cdn.datatables.net/1.13.8/css/dataTables.bootstrap5.min.css">
+{% endblock %}
+
+{% block content %}
+
+<style>
+  .x-card {
+    border: 0;
+    border-radius: 1rem;
+    position: relative;
+    overflow: hidden;
+  }
+  .x-muted { color: rgba(0,0,0,.60); }
+  .x-pill {
+    border: 1px solid rgba(0,0,0,.10);
+    border-radius: 999px;
+    padding: .35rem .65rem;
+    font-size: .85rem;
+    background: #fff;
+  }
+  .x-kpi {
+    border: 1px solid rgba(0,0,0,.08);
+    border-radius: .9rem;
+    padding: .85rem .9rem;
+    background: #fff;
+  }
+  .x-kpi .label { font-size: .8rem; color: rgba(0,0,0,.55); }
+  .x-kpi .value { font-size: 1.15rem; font-weight: 700; line-height: 1.1; }
+  .bar-row {
+    display: grid;
+    grid-template-columns: 100px 1fr 60px;
+    gap: .75rem;
+    align-items: center;
+    margin-bottom: .5rem;
+  }
+  .bar-track {
+    background: #eef2f7;
+    border-radius: 999px;
+    height: .7rem;
+    overflow: hidden;
+  }
+  .bar-fill {
+    background: linear-gradient(90deg, #111827, #6366f1);
+    height: 100%;
+  }
+  pre.x-pre {
+    max-height: 340px;
+    overflow: auto;
+    background: #0b1020;
+    color: #d7e2ff;
+    border-radius: .75rem;
+    padding: 1rem;
+    font-size: .85rem;
+    margin: 0;
+  }
+</style>
+
+<div class="container-fluid py-4">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 1080;">
+        {% for category, message in messages %}
+          <div class="toast text-bg-{{ category }} border-0 mb-2" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="d-flex">
+              <div class="toast-body">{{ message }}</div>
+              <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <div class="d-flex align-items-end justify-content-between mb-3">
+    <div>
+      <h3 class="mb-1">X Usage</h3>
+      <div class="x-muted">Monitor project usage and drill into daily counts.</div>
+    </div>
+  </div>
+
+  <div class="row g-4">
+    <div class="col-lg-4">
+      <div class="card x-card shadow-sm">
+        <div class="card-body p-3 p-md-4">
+          <div class="d-flex align-items-center justify-content-between mb-3">
+            <div>
+              <h5 class="mb-1">Usage query</h5>
+              <div class="x-muted small">Default is last 24 hours.</div>
+            </div>
+            <span class="badge text-bg-light border">X API</span>
+          </div>
+
+          {% if known_limit %}
+            <div class="alert alert-warning d-flex align-items-start gap-2 mb-3">
+              <div class="fw-semibold">Known limitation:</div>
+              <div class="flex-grow-1">{{ known_limit }}</div>
+            </div>
+          {% endif %}
+          {% if error %}
+            <div class="alert alert-warning d-flex align-items-start gap-2 mb-3">
+              <div class="fw-semibold">Heads up:</div>
+              <div class="flex-grow-1">{{ error }}</div>
+            </div>
+          {% endif %}
+
+          <form method="post">
+            <label class="form-label small x-muted mb-1">Time period</label>
+            <div class="input-group mb-2">
+              <input
+                type="number"
+                name="time_value"
+                class="form-control"
+                value="{{ time_value or '24' }}"
+                min="1"
+                max="2160"
+              >
+              <select class="form-select" name="time_unit">
+                <option value="hours" {% if time_unit == 'hours' %}selected{% endif %}>Hours</option>
+                <option value="days" {% if time_unit == 'days' %}selected{% endif %}>Days</option>
+              </select>
+            </div>
+            <div class="form-text">Hours are converted to days for the API (max 90 days).</div>
+
+            <label class="form-label small x-muted mb-1 mt-3">Override days (optional)</label>
+            <input
+              type="number"
+              name="days"
+              class="form-control"
+              value="{{ days or '' }}"
+              min="1"
+              max="90"
+              placeholder="7"
+            >
+
+            <div class="d-flex align-items-center justify-content-between mt-3">
+              <div class="form-text">Requires app-only bearer token.</div>
+              <button class="btn btn-dark" type="submit">Fetch usage</button>
+            </div>
+          </form>
+
+          {% if result %}
+            <hr class="my-4">
+            <div class="row g-2">
+              <div class="col-12">
+                <button
+                  class="btn btn-link text-decoration-none p-0"
+                  type="button"
+                  data-bs-toggle="collapse"
+                  data-bs-target="#rawResponse"
+                  aria-expanded="false"
+                  aria-controls="rawResponse"
+                >
+                  View raw X API response
+                </button>
+              </div>
+              <div class="col-12">
+                <div id="rawResponse" class="collapse mt-2">
+                  <pre class="x-pre">{{ result | tojson(indent=2) }}</pre>
+                </div>
+              </div>
+            </div>
+
+            {% if curl_preview %}
+              <div class="row g-2 mt-3">
+                <div class="col-12 d-flex align-items-center justify-content-between">
+                  <button
+                    class="btn btn-link text-decoration-none p-0"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#curlPreview"
+                    aria-expanded="false"
+                    aria-controls="curlPreview"
+                  >
+                    View sanitized curl command
+                  </button>
+                  <button
+                    class="btn btn-sm btn-outline-dark"
+                    type="button"
+                    data-copy-target="#curlPreviewBox"
+                    onclick="
+                      const el = document.querySelector(this.getAttribute('data-copy-target'));
+                      if (!el) return;
+                      const text = el.textContent || '';
+                      navigator.clipboard.writeText(text);
+                      const original = this.textContent;
+                      this.textContent = 'Copied!';
+                      setTimeout(() => this.textContent = original, 1200);
+                    "
+                  >
+                    Copy curl
+                  </button>
+                </div>
+                <div class="col-12">
+                  <div id="curlPreview" class="collapse mt-2">
+                    <textarea
+                      id="curlPreviewBox"
+                      class="form-control font-monospace"
+                      rows="6"
+                      style="width: 100%; resize: vertical;"
+                    >{{ curl_preview }}</textarea>
+                    <div class="form-text">
+                      Sanitized curl is safe to share. Click "Copy curl" to copy the full command.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            {% endif %}
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    <div class="col-lg-8">
+      <div class="card x-card shadow-sm">
+        <div class="card-body">
+          <div class="d-flex align-items-center justify-content-between mb-3">
+            <div>
+              <h5 class="mb-1">Usage dashboard</h5>
+              <div class="x-muted small">Project caps and daily trends.</div>
+            </div>
+          </div>
+
+          {% if result and result.data %}
+            {% set usage = result.data %}
+            <div class="row g-3 mb-4">
+              <div class="col-6 col-md-3">
+                <div class="x-kpi">
+                  <div class="label">Project cap</div>
+                  <div class="value">{{ usage.project_cap | default('—') }}</div>
+                </div>
+              </div>
+              <div class="col-6 col-md-3">
+                <div class="x-kpi">
+                  <div class="label">Project usage</div>
+                  <div class="value">{{ usage.project_usage | default('—') }}</div>
+                </div>
+              </div>
+              <div class="col-6 col-md-3">
+                <div class="x-kpi">
+                  <div class="label">Cap reset (days)</div>
+                  <div class="value">{{ usage.cap_reset_day | default('—') }}</div>
+                </div>
+              </div>
+              <div class="col-6 col-md-3">
+                <div class="x-kpi">
+                  <div class="label">Project ID</div>
+                  <div class="value">{{ usage.project_id | default('—') }}</div>
+                </div>
+              </div>
+            </div>
+
+            {% if usage.daily_project_usage and usage.daily_project_usage.usage %}
+              {% set usage_list = usage.daily_project_usage.usage %}
+              {% set usage_values = usage_list | map(attribute='usage') | map('int') | list %}
+              {% set max_value = (usage_values | max) if usage_values | length > 0 else 0 %}
+              <div class="mb-4">
+                <div class="d-flex align-items-center justify-content-between mb-2">
+                  <div class="fw-semibold">Daily project usage</div>
+                  <span class="x-muted small">{{ usage_list | length }} days</span>
+                </div>
+                {% for item in usage_list %}
+                  {% set item_usage = item.usage | int %}
+                  <div class="bar-row">
+                    <div class="x-muted small">{{ item.date[:10] if item.date else '—' }}</div>
+                    <div class="bar-track">
+                      {% set pct = (item_usage / max_value * 100) if max_value else 0 %}
+                      <div class="bar-fill" style="width: {{ pct | round(0) }}%"></div>
+                    </div>
+                    <div class="text-end small">{{ item_usage }}</div>
+                  </div>
+                {% endfor %}
+              </div>
+            {% endif %}
+
+            {% if usage.daily_client_app_usage %}
+              <div>
+                <div class="fw-semibold mb-2">Client app usage</div>
+                <div class="row g-3">
+                  {% for app_usage in usage.daily_client_app_usage %}
+                    <div class="col-md-6">
+                      <div class="card border-0 shadow-sm">
+                        <div class="card-body">
+                          <div class="d-flex align-items-center justify-content-between">
+                            <div>
+                              <div class="x-muted small">Client app</div>
+                              <div class="fw-semibold">{{ app_usage.client_app_id }}</div>
+                            </div>
+                            <button
+                              class="btn btn-sm btn-outline-dark"
+                              type="button"
+                              data-bs-toggle="modal"
+                              data-bs-target="#clientModal{{ loop.index }}"
+                            >
+                              Drilldown
+                            </button>
+                          </div>
+                          <div class="x-muted small mt-2">Results: {{ app_usage.usage_result_count | default('—') }}</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div class="modal fade" id="clientModal{{ loop.index }}" tabindex="-1" aria-hidden="true">
+                      <div class="modal-dialog modal-lg modal-dialog-scrollable">
+                        <div class="modal-content">
+                          <div class="modal-header">
+                            <div>
+                              <div class="x-muted small mb-1">Client app</div>
+                              <h5 class="modal-title">{{ app_usage.client_app_id }}</h5>
+                            </div>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                          </div>
+                          <div class="modal-body">
+                            {% set app_list = app_usage.usage or [] %}
+                            {% set app_values = app_list | map(attribute='usage') | map('int') | list %}
+                            {% set app_max = (app_values | max) if app_values | length > 0 else 0 %}
+                            {% for item in app_list %}
+                              {% set item_usage = item.usage | int %}
+                              <div class="bar-row">
+                                <div class="x-muted small">{{ item.date[:10] if item.date else '—' }}</div>
+                                <div class="bar-track">
+                                  {% set pct = (item_usage / app_max * 100) if app_max else 0 %}
+                                  <div class="bar-fill" style="width: {{ pct | round(0) }}%"></div>
+                                </div>
+                                <div class="text-end small">{{ item_usage }}</div>
+                              </div>
+                            {% else %}
+                              <div class="text-muted">No usage entries reported.</div>
+                            {% endfor %}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  {% endfor %}
+                </div>
+              </div>
+            {% endif %}
+          {% else %}
+            <div class="text-muted">Run a usage query to populate the dashboard.</div>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="mt-5">
+    <div class="d-flex align-items-center justify-content-between mb-3">
+      <div>
+        <h5 class="mb-1">Usage history</h5>
+        <div class="x-muted small">Saved snapshots with drilldowns.</div>
+      </div>
+    </div>
+    <div class="card x-card shadow-sm">
+      <div class="card-body">
+        <div class="table-responsive">
+          <table id="usageTable" class="table table-sm align-middle mb-0">
+            <thead>
+              <tr>
+                <th>Fetched</th>
+                <th>Days</th>
+                <th>Project usage</th>
+                <th>Project cap</th>
+                <th>Project ID</th>
+                <th>View</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal fade" id="usageSnapshotModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div>
+          <div class="x-muted small mb-1">Usage snapshot</div>
+          <h5 class="modal-title" id="usageSnapshotTitle">Snapshot details</h5>
+        </div>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="usageSnapshotMeta" class="d-flex flex-wrap gap-2 mb-3"></div>
+        <h6>Raw data</h6>
+        <pre class="x-pre" id="usageSnapshotRaw"></pre>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    const toastElList = [].slice.call(document.querySelectorAll('.toast'));
+    toastElList.map((toastEl) => new bootstrap.Toast(toastEl).show());
+
+    const table = $('#usageTable').DataTable({
+      processing: true,
+      serverSide: true,
+      ajax: {
+        url: '{{ url_for("x_api.usage_data") }}',
+      },
+      order: [[0, 'desc']],
+      columns: [
+        { data: 'created_at' },
+        { data: 'days' },
+        { data: 'project_usage' },
+        { data: 'project_cap' },
+        { data: 'project_id' },
+        {
+          data: 'id',
+          orderable: false,
+          searchable: false,
+          render: function(data) {
+            return `<button class="btn btn-sm btn-outline-dark" data-snapshot-id="${data}">View</button>`;
+          }
+        }
+      ]
+    });
+
+    $('#usageTable tbody').on('click', 'button[data-snapshot-id]', function() {
+      const snapshotId = $(this).data('snapshot-id');
+      fetch(`{{ url_for("x_api.usage_snapshot", snapshot_id=0) }}`.replace('0', snapshotId))
+        .then(resp => resp.json())
+        .then(data => {
+          if (data.error) {
+            return;
+          }
+          const meta = [];
+          if (data.days) meta.push(`Days: ${data.days}`);
+          if (data.hours) meta.push(`Hours: ${data.hours}`);
+          if (data.project_usage) meta.push(`Usage: ${data.project_usage}`);
+          if (data.project_cap) meta.push(`Cap: ${data.project_cap}`);
+          if (data.cap_reset_day) meta.push(`Reset: ${data.cap_reset_day} days`);
+          const metaContainer = document.getElementById('usageSnapshotMeta');
+          metaContainer.innerHTML = meta.map(item => `<span class=\"x-pill\">${item}</span>`).join('');
+          const title = document.getElementById('usageSnapshotTitle');
+          title.textContent = data.created_at ? `Fetched ${data.created_at}` : 'Snapshot details';
+          const raw = document.getElementById('usageSnapshotRaw');
+          raw.textContent = JSON.stringify(data.raw_usage_data || {}, null, 2);
+          const modal = new bootstrap.Modal(document.getElementById('usageSnapshotModal'));
+          modal.show();
+        });
+    });
+  });
+</script>
+
+{% endblock %}
+
+{% block extra_js %}
+  <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
+  <script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
+{% endblock %}
