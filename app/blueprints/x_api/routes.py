@@ -13,6 +13,11 @@ from app.blueprints.x_api.commands import x_api_cli
 from app.blueprints.x_api.helpers import (
     EXPANSIONS,
     COMMUNITY_FIELDS,
+    ACTIVITY_EVENT_TYPES,
+    MEDIA_FIELDS,
+    POLL_FIELDS,
+    PLACE_FIELDS,
+    SEARCH_COUNT_FIELDS,
     LIST_EXPANSIONS,
     LIST_FIELDS,
     NEWS_FIELDS,
@@ -29,6 +34,10 @@ from app.blueprints.x_api.helpers import (
     _process_image_bytes,
     add_x_list_member,
     create_x_list,
+    create_x_activity_subscription,
+    create_x_post,
+    delete_x_activity_subscription,
+    delete_x_post,
     delete_x_list,
     follow_x_list,
     get_api_request_history,
@@ -58,7 +67,17 @@ from app.blueprints.x_api.helpers import (
     get_x_personalized_trends,
     get_x_trends_by_woeid,
     get_x_news_by_id,
+    get_x_home_timeline,
+    get_x_activity_subscriptions,
     get_x_media_upload_status,
+    get_x_post_by_id,
+    get_x_posts_by_ids,
+    get_x_posts_counts_all,
+    get_x_posts_counts_recent,
+    get_x_quote_tweets,
+    get_x_reposts_of_me,
+    get_x_user_mentions,
+    get_x_user_posts,
     initialize_x_media_upload,
     append_x_media_upload,
     finalize_x_media_upload,
@@ -72,11 +91,16 @@ from app.blueprints.x_api.helpers import (
     resolve_x_user_id,
     resolve_x_post_id,
     search_x_communities,
+    search_x_posts_all,
+    search_x_posts_recent,
     unmute_x_user,
     unfollow_x_list,
     unlike_x_post,
     unpin_x_list,
+    unrepost_x_post,
     update_x_list,
+    repost_x_post,
+    update_x_activity_subscription,
 )
 from app.extensions import db
 from app.models import ApiRequestLog, UserOAuthToken, XMediaUpload, XNewsStorySnapshot, XPost, XSpace, XTrendSnapshot, XUsageSnapshot, XUser
@@ -338,6 +362,1125 @@ def users():
 def history():
     logs = get_api_request_history()
     return render_template("x_api/history.html", logs=logs)
+
+
+@bp.route("/activity", methods=["GET", "POST"])
+@login_required
+def activity():
+    event_type = ""
+    event_type_custom = ""
+    filter_type = "user_id"
+    filter_user_identifier = ""
+    filter_user_select = ""
+    filter_keyword = ""
+    tag = ""
+    webhook_id = ""
+    update_subscription_id = ""
+    update_tag = ""
+    update_webhook_id = ""
+    delete_subscription_id = ""
+    result = None
+    error = session.get("x_activity_lookup_error")
+    known_limit = session.get("x_activity_known_limit")
+    curl_preview = session.get("x_activity_lookup_curl")
+    log_id = session.get("x_activity_lookup_log_id")
+
+    if log_id:
+        log = ApiRequestLog.query.get(log_id)
+        if log and log.response_body:
+            body = log.response_body
+            try:
+                result = json.loads(body)
+            except json.JSONDecodeError:
+                result = None
+                if body.startswith('"') and body.endswith('"'):
+                    try:
+                        unescaped = json.loads(body)
+                        if isinstance(unescaped, str) and unescaped.lstrip().startswith(("{", "[")):
+                            result = json.loads(unescaped)
+                    except json.JSONDecodeError:
+                        result = None
+                if result is None:
+                    result = {"raw": body}
+        if isinstance(result, dict) and isinstance(result.get("raw"), str):
+            raw_payload = result["raw"].lstrip()
+            if raw_payload.startswith(("{", "[")):
+                try:
+                    result = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    pass
+
+    if request.method == "POST":
+        known_limit = None
+        event_type = request.form.get("event_type", "").strip()
+        event_type_custom = request.form.get("event_type_custom", "").strip()
+        filter_type = request.form.get("filter_type", "user_id").strip() or "user_id"
+        filter_user_identifier = request.form.get("filter_user_identifier", "").strip()
+        filter_user_select = request.form.get("filter_user_select", "").strip()
+        filter_keyword = request.form.get("filter_keyword", "").strip()
+        tag = request.form.get("tag", "").strip()
+        webhook_id = request.form.get("webhook_id", "").strip()
+        update_subscription_id = request.form.get("update_subscription_id", "").strip()
+        update_tag = request.form.get("update_tag", "").strip()
+        update_webhook_id = request.form.get("update_webhook_id", "").strip()
+        delete_subscription_id = request.form.get("delete_subscription_id", "").strip()
+        curl_preview = None
+
+        def build_curl(
+            url: str,
+            method: str = "GET",
+            params_dict: dict | None = None,
+            payload: dict | None = None,
+        ) -> str:
+            parts = ['curl -H "Authorization: Bearer <token>"']
+            if method != "GET":
+                parts.append(f"-X {method}")
+            if payload is not None:
+                parts.append(f"-d '{json.dumps(payload, indent=2)}'")
+            if params_dict:
+                query = urlencode(params_dict, safe=",")
+                return " ".join(parts + [f'"{url}?{query}"'])
+            return " ".join(parts + [f'"{url}"'])
+
+        action = request.form.get("activity_action")
+        response = None
+        if action == "create_subscription":
+            selected_event_type = event_type_custom or event_type
+            if not selected_event_type:
+                error = "Please provide an event type."
+                flash(error, "warning")
+            else:
+                filter_payload = None
+                if filter_type == "keyword":
+                    if not filter_keyword:
+                        error = "Please provide a keyword filter."
+                        flash(error, "warning")
+                    else:
+                        filter_payload = {"keyword": filter_keyword}
+                else:
+                    identifier = filter_user_select or filter_user_identifier
+                    if not identifier:
+                        error = "Please provide a user ID or username."
+                        flash(error, "warning")
+                    else:
+                        resolved_user_id, resolve_error = resolve_x_user_id(identifier)
+                        if resolve_error:
+                            error = resolve_error
+                            flash(resolve_error, "warning")
+                        else:
+                            filter_payload = {"user_id": resolved_user_id}
+
+                if filter_payload:
+                    flash("Subscription create started.", "info")
+                    response = create_x_activity_subscription(
+                        selected_event_type,
+                        filter_payload,
+                        tag=tag or None,
+                        webhook_id=webhook_id or None,
+                    )
+                    curl_payload = {
+                        "event_type": "<EVENT_TYPE>",
+                        "filter": {"keyword": "<KEYWORD>"} if filter_type == "keyword" else {"user_id": "<USER_ID>"},
+                    }
+                    if tag:
+                        curl_payload["tag"] = "<TAG>"
+                    if webhook_id:
+                        curl_payload["webhook_id"] = "<WEBHOOK_ID>"
+                    curl_preview = build_curl(
+                        "https://api.x.com/2/activity/subscriptions",
+                        method="POST",
+                        payload=curl_payload,
+                    )
+        elif action == "list_subscriptions":
+            flash("Subscription list started.", "info")
+            response = get_x_activity_subscriptions()
+            curl_preview = build_curl("https://api.x.com/2/activity/subscriptions")
+        elif action == "update_subscription":
+            if not update_subscription_id:
+                error = "Please provide a subscription ID to update."
+                flash(error, "warning")
+            else:
+                update_payload = {}
+                if update_tag:
+                    update_payload["tag"] = update_tag
+                if update_webhook_id:
+                    update_payload["webhook_id"] = update_webhook_id
+                if not update_payload:
+                    error = "Provide at least one value (tag or webhook ID) to update."
+                    flash(error, "warning")
+                else:
+                    flash("Subscription update started.", "info")
+                    response = update_x_activity_subscription(
+                        update_subscription_id,
+                        tag=update_tag or None,
+                        webhook_id=update_webhook_id or None,
+                    )
+                    curl_payload = {}
+                    if update_tag:
+                        curl_payload["tag"] = "<TAG>"
+                    if update_webhook_id:
+                        curl_payload["webhook_id"] = "<WEBHOOK_ID>"
+                    curl_preview = build_curl(
+                        "https://api.x.com/2/activity/subscriptions/<SUBSCRIPTION_ID>",
+                        method="PUT",
+                        payload=curl_payload,
+                    )
+        elif action == "delete_subscription":
+            if not delete_subscription_id:
+                error = "Please provide a subscription ID to delete."
+                flash(error, "warning")
+            else:
+                flash("Subscription delete started.", "info")
+                response = delete_x_activity_subscription(delete_subscription_id)
+                curl_preview = build_curl(
+                    "https://api.x.com/2/activity/subscriptions/<SUBSCRIPTION_ID>",
+                    method="DELETE",
+                )
+        else:
+            response = None
+            error = "Please select an activity action to run."
+            flash("Please select an action first.", "warning")
+
+        def extract_problem(payload: dict) -> dict | None:
+            if not isinstance(payload, dict):
+                return None
+            if payload.get("type") or payload.get("title"):
+                return payload
+            errors = payload.get("errors")
+            if isinstance(errors, list) and errors:
+                return errors[0]
+            return None
+
+        if response is None and error is None:
+            error = "Unable to call X API; check your credentials."
+            result = None
+            flash("Lookup failed. Check your credentials.", "danger")
+        elif response is not None:
+            if isinstance(response, dict):
+                result = response
+                if response.get("error"):
+                    error = response["error"]
+                    flash(response["error"], "warning")
+                else:
+                    flash("Lookup complete.", "success")
+            else:
+                try:
+                    result = response.json()
+                except ValueError:
+                    result = {"raw": response.text}
+                problem = extract_problem(result)
+                if problem and (
+                    problem.get("type") == "https://api.twitter.com/2/problems/client-forbidden"
+                    or problem.get("title") == "Client Forbidden"
+                ):
+                    known_limit = (
+                        "X returned Client Forbidden for this endpoint. "
+                        "Your developer app may need elevated access to use X Activity API."
+                    )
+                    error = known_limit
+                    flash(known_limit, "warning")
+                if response.status_code and response.status_code >= 400:
+                    flash(f"Lookup failed with status {response.status_code}.", "danger")
+                else:
+                    flash("Lookup complete.", "success")
+
+        log_id = session.get("x_last_api_log_id") if response is not None else None
+        if isinstance(response, dict) and response.get("error") and not log_id:
+            log_id = None
+        session["x_activity_lookup_log_id"] = log_id
+        session["x_activity_lookup_error"] = error
+        session["x_activity_lookup_curl"] = curl_preview
+        session["x_activity_known_limit"] = known_limit
+        return redirect(url_for("x_api.activity"))
+
+    return render_template(
+        "x_api/activity.html",
+        event_type=event_type,
+        event_type_custom=event_type_custom,
+        filter_type=filter_type,
+        filter_user_identifier=filter_user_identifier,
+        filter_user_select=filter_user_select,
+        filter_keyword=filter_keyword,
+        tag=tag,
+        webhook_id=webhook_id,
+        update_subscription_id=update_subscription_id,
+        update_tag=update_tag,
+        update_webhook_id=update_webhook_id,
+        delete_subscription_id=delete_subscription_id,
+        result=result,
+        error=error,
+        known_limit=known_limit,
+        curl_preview=curl_preview,
+        event_types=ACTIVITY_EVENT_TYPES,
+        existing_users=XUser.query.order_by(XUser.username.asc()).limit(200).all(),
+    )
+
+
+@bp.route("/posts", methods=["GET", "POST"])
+@login_required
+def posts():
+    post_text = ""
+    post_card_uri = ""
+    post_direct_message_deep_link = ""
+    post_quote_tweet_id = ""
+    post_community_id = ""
+    post_geo_place_id = ""
+    post_reply_settings = ""
+    post_for_super_followers_only = False
+    post_nullcast = False
+    post_share_with_followers = False
+    post_media_ids = ""
+    post_media_tagged_user_ids = ""
+    post_media_select = []
+    post_poll_options = ""
+    post_poll_duration = ""
+    post_poll_reply_settings = ""
+    post_reply_to_id = ""
+    post_reply_auto_metadata = False
+    post_reply_exclude_user_ids = ""
+    post_edit_previous_id = ""
+    post_schedule_time = ""
+    delete_post_id = ""
+    repost_post_id = ""
+    lookup_post_id = ""
+    lookup_post_ids = ""
+    quote_post_id = ""
+    quote_max_results = ""
+    quote_pagination_token = ""
+    quote_exclude_replies = False
+    quote_exclude_retweets = False
+    search_recent_query = ""
+    search_recent_start_time = ""
+    search_recent_end_time = ""
+    search_recent_since_id = ""
+    search_recent_until_id = ""
+    search_recent_max_results = ""
+    search_recent_next_token = ""
+    search_recent_pagination_token = ""
+    search_recent_sort_order = ""
+    search_all_query = ""
+    search_all_start_time = ""
+    search_all_end_time = ""
+    search_all_since_id = ""
+    search_all_until_id = ""
+    search_all_max_results = ""
+    search_all_next_token = ""
+    search_all_pagination_token = ""
+    search_all_sort_order = ""
+    counts_recent_query = ""
+    counts_recent_start_time = ""
+    counts_recent_end_time = ""
+    counts_recent_since_id = ""
+    counts_recent_until_id = ""
+    counts_recent_granularity = ""
+    counts_recent_next_token = ""
+    counts_recent_pagination_token = ""
+    counts_all_query = ""
+    counts_all_start_time = ""
+    counts_all_end_time = ""
+    counts_all_since_id = ""
+    counts_all_until_id = ""
+    counts_all_granularity = ""
+    counts_all_next_token = ""
+    counts_all_pagination_token = ""
+    timeline_user_identifier = ""
+    timeline_user_select = ""
+    timeline_max_results = ""
+    timeline_pagination_token = ""
+    timeline_since_id = ""
+    timeline_until_id = ""
+    timeline_start_time = ""
+    timeline_end_time = ""
+    timeline_exclude_replies = False
+    timeline_exclude_retweets = False
+    mentions_user_identifier = ""
+    mentions_user_select = ""
+    mentions_max_results = ""
+    mentions_pagination_token = ""
+    mentions_since_id = ""
+    mentions_until_id = ""
+    mentions_start_time = ""
+    mentions_end_time = ""
+    home_max_results = ""
+    home_pagination_token = ""
+    home_since_id = ""
+    home_until_id = ""
+    home_start_time = ""
+    home_end_time = ""
+    home_exclude_replies = False
+    home_exclude_retweets = False
+    reposts_max_results = ""
+    reposts_pagination_token = ""
+    result = None
+    error = session.get("x_posts_lookup_error")
+    known_limit = session.get("x_posts_known_limit")
+    curl_preview = session.get("x_posts_lookup_curl")
+    log_id = session.get("x_posts_lookup_log_id")
+
+    if log_id:
+        log = ApiRequestLog.query.get(log_id)
+        if log and log.response_body:
+            body = log.response_body
+            try:
+                result = json.loads(body)
+            except json.JSONDecodeError:
+                result = None
+                if body.startswith('"') and body.endswith('"'):
+                    try:
+                        unescaped = json.loads(body)
+                        if isinstance(unescaped, str) and unescaped.lstrip().startswith(("{", "[")):
+                            result = json.loads(unescaped)
+                    except json.JSONDecodeError:
+                        result = None
+                if result is None:
+                    result = {"raw": body}
+        if isinstance(result, dict) and isinstance(result.get("raw"), str):
+            raw_payload = result["raw"].lstrip()
+            if raw_payload.startswith(("{", "[")):
+                try:
+                    result = json.loads(raw_payload)
+                except json.JSONDecodeError:
+                    pass
+
+    if request.method == "POST":
+        known_limit = None
+        post_text = request.form.get("post_text", "").strip()
+        post_card_uri = request.form.get("post_card_uri", "").strip()
+        post_direct_message_deep_link = request.form.get("post_direct_message_deep_link", "").strip()
+        post_quote_tweet_id = request.form.get("post_quote_tweet_id", "").strip()
+        post_community_id = request.form.get("post_community_id", "").strip()
+        post_geo_place_id = request.form.get("post_geo_place_id", "").strip()
+        post_reply_settings = request.form.get("post_reply_settings", "").strip()
+        post_for_super_followers_only = request.form.get("post_for_super_followers_only") == "on"
+        post_nullcast = request.form.get("post_nullcast") == "on"
+        post_share_with_followers = request.form.get("post_share_with_followers") == "on"
+        post_media_ids = request.form.get("post_media_ids", "").strip()
+        post_media_tagged_user_ids = request.form.get("post_media_tagged_user_ids", "").strip()
+        post_media_select = request.form.getlist("post_media_select")
+        post_poll_options = request.form.get("post_poll_options", "").strip()
+        post_poll_duration = request.form.get("post_poll_duration", "").strip()
+        post_poll_reply_settings = request.form.get("post_poll_reply_settings", "").strip()
+        post_reply_to_id = request.form.get("post_reply_to_id", "").strip()
+        post_reply_auto_metadata = request.form.get("post_reply_auto_metadata") == "on"
+        post_reply_exclude_user_ids = request.form.get("post_reply_exclude_user_ids", "").strip()
+        post_edit_previous_id = request.form.get("post_edit_previous_id", "").strip()
+        post_schedule_time = request.form.get("post_schedule_time", "").strip()
+        delete_post_id = request.form.get("delete_post_id", "").strip()
+        repost_post_id = request.form.get("repost_post_id", "").strip()
+        lookup_post_id = request.form.get("lookup_post_id", "").strip()
+        lookup_post_ids = request.form.get("lookup_post_ids", "").strip()
+        quote_post_id = request.form.get("quote_post_id", "").strip()
+        quote_max_results = request.form.get("quote_max_results", "").strip()
+        quote_pagination_token = request.form.get("quote_pagination_token", "").strip()
+        quote_exclude_replies = request.form.get("quote_exclude_replies") == "on"
+        quote_exclude_retweets = request.form.get("quote_exclude_retweets") == "on"
+        search_recent_query = request.form.get("search_recent_query", "").strip()
+        search_recent_start_time = request.form.get("search_recent_start_time", "").strip()
+        search_recent_end_time = request.form.get("search_recent_end_time", "").strip()
+        search_recent_since_id = request.form.get("search_recent_since_id", "").strip()
+        search_recent_until_id = request.form.get("search_recent_until_id", "").strip()
+        search_recent_max_results = request.form.get("search_recent_max_results", "").strip()
+        search_recent_next_token = request.form.get("search_recent_next_token", "").strip()
+        search_recent_pagination_token = request.form.get("search_recent_pagination_token", "").strip()
+        search_recent_sort_order = request.form.get("search_recent_sort_order", "").strip()
+        search_all_query = request.form.get("search_all_query", "").strip()
+        search_all_start_time = request.form.get("search_all_start_time", "").strip()
+        search_all_end_time = request.form.get("search_all_end_time", "").strip()
+        search_all_since_id = request.form.get("search_all_since_id", "").strip()
+        search_all_until_id = request.form.get("search_all_until_id", "").strip()
+        search_all_max_results = request.form.get("search_all_max_results", "").strip()
+        search_all_next_token = request.form.get("search_all_next_token", "").strip()
+        search_all_pagination_token = request.form.get("search_all_pagination_token", "").strip()
+        search_all_sort_order = request.form.get("search_all_sort_order", "").strip()
+        counts_recent_query = request.form.get("counts_recent_query", "").strip()
+        counts_recent_start_time = request.form.get("counts_recent_start_time", "").strip()
+        counts_recent_end_time = request.form.get("counts_recent_end_time", "").strip()
+        counts_recent_since_id = request.form.get("counts_recent_since_id", "").strip()
+        counts_recent_until_id = request.form.get("counts_recent_until_id", "").strip()
+        counts_recent_granularity = request.form.get("counts_recent_granularity", "").strip()
+        counts_recent_next_token = request.form.get("counts_recent_next_token", "").strip()
+        counts_recent_pagination_token = request.form.get("counts_recent_pagination_token", "").strip()
+        counts_all_query = request.form.get("counts_all_query", "").strip()
+        counts_all_start_time = request.form.get("counts_all_start_time", "").strip()
+        counts_all_end_time = request.form.get("counts_all_end_time", "").strip()
+        counts_all_since_id = request.form.get("counts_all_since_id", "").strip()
+        counts_all_until_id = request.form.get("counts_all_until_id", "").strip()
+        counts_all_granularity = request.form.get("counts_all_granularity", "").strip()
+        counts_all_next_token = request.form.get("counts_all_next_token", "").strip()
+        counts_all_pagination_token = request.form.get("counts_all_pagination_token", "").strip()
+        timeline_user_identifier = request.form.get("timeline_user_identifier", "").strip()
+        timeline_user_select = request.form.get("timeline_user_select", "").strip()
+        timeline_max_results = request.form.get("timeline_max_results", "").strip()
+        timeline_pagination_token = request.form.get("timeline_pagination_token", "").strip()
+        timeline_since_id = request.form.get("timeline_since_id", "").strip()
+        timeline_until_id = request.form.get("timeline_until_id", "").strip()
+        timeline_start_time = request.form.get("timeline_start_time", "").strip()
+        timeline_end_time = request.form.get("timeline_end_time", "").strip()
+        timeline_exclude_replies = request.form.get("timeline_exclude_replies") == "on"
+        timeline_exclude_retweets = request.form.get("timeline_exclude_retweets") == "on"
+        mentions_user_identifier = request.form.get("mentions_user_identifier", "").strip()
+        mentions_user_select = request.form.get("mentions_user_select", "").strip()
+        mentions_max_results = request.form.get("mentions_max_results", "").strip()
+        mentions_pagination_token = request.form.get("mentions_pagination_token", "").strip()
+        mentions_since_id = request.form.get("mentions_since_id", "").strip()
+        mentions_until_id = request.form.get("mentions_until_id", "").strip()
+        mentions_start_time = request.form.get("mentions_start_time", "").strip()
+        mentions_end_time = request.form.get("mentions_end_time", "").strip()
+        home_max_results = request.form.get("home_max_results", "").strip()
+        home_pagination_token = request.form.get("home_pagination_token", "").strip()
+        home_since_id = request.form.get("home_since_id", "").strip()
+        home_until_id = request.form.get("home_until_id", "").strip()
+        home_start_time = request.form.get("home_start_time", "").strip()
+        home_end_time = request.form.get("home_end_time", "").strip()
+        home_exclude_replies = request.form.get("home_exclude_replies") == "on"
+        home_exclude_retweets = request.form.get("home_exclude_retweets") == "on"
+        reposts_max_results = request.form.get("reposts_max_results", "").strip()
+        reposts_pagination_token = request.form.get("reposts_pagination_token", "").strip()
+        curl_preview = None
+
+        def parse_csv(value: str) -> list[str]:
+            return [item.strip() for item in value.split(",") if item.strip()]
+
+        def parse_poll_options(value: str) -> list[str]:
+            if "\n" in value:
+                return [item.strip() for item in value.splitlines() if item.strip()]
+            return parse_csv(value)
+
+        def build_curl(
+            url: str,
+            method: str = "GET",
+            params_dict: dict | None = None,
+            payload: dict | None = None,
+        ) -> str:
+            parts = ['curl -H "Authorization: Bearer <token>"']
+            if method != "GET":
+                parts.append(f"-X {method}")
+            if payload is not None:
+                parts.append(f"-d '{json.dumps(payload, indent=2)}'")
+            if params_dict:
+                query = urlencode(params_dict, safe=",")
+                return " ".join(parts + [f'"{url}?{query}"'])
+            return " ".join(parts + [f'"{url}"'])
+
+        action = request.form.get("posts_action")
+        response = None
+        if action == "create_post":
+            if post_schedule_time:
+                error = "Scheduling is not available in X API v2 yet."
+                flash(error, "warning")
+            else:
+                media_ids = parse_csv(post_media_ids)
+                media_ids.extend([item for item in post_media_select if item])
+                poll_options = parse_poll_options(post_poll_options)
+                conflicts = []
+                if post_card_uri and (post_quote_tweet_id or poll_options or media_ids or post_direct_message_deep_link):
+                    conflicts.append("card_uri cannot be combined with quote, poll, media, or DM deep links.")
+                if poll_options and (media_ids or post_quote_tweet_id or post_card_uri):
+                    conflicts.append("poll cannot be combined with media, quote, or card URI.")
+                if media_ids and (post_quote_tweet_id or post_card_uri or poll_options):
+                    conflicts.append("media cannot be combined with quote, card URI, or poll.")
+                if conflicts:
+                    error = " ".join(conflicts)
+                    flash(error, "warning")
+                else:
+                    payload: dict[str, Any] = {}
+                    if post_text:
+                        payload["text"] = post_text
+                    if post_card_uri:
+                        payload["card_uri"] = post_card_uri
+                    if post_direct_message_deep_link:
+                        payload["direct_message_deep_link"] = post_direct_message_deep_link
+                    if post_quote_tweet_id:
+                        payload["quote_tweet_id"] = post_quote_tweet_id
+                    if post_community_id:
+                        payload["community_id"] = post_community_id
+                    if post_geo_place_id:
+                        payload["geo"] = {"place_id": post_geo_place_id}
+                    if post_reply_settings:
+                        payload["reply_settings"] = post_reply_settings
+                    if post_for_super_followers_only:
+                        payload["for_super_followers_only"] = True
+                    if post_nullcast:
+                        payload["nullcast"] = True
+                    if post_share_with_followers:
+                        payload["share_with_followers"] = True
+                    if media_ids:
+                        media_payload = {"media_ids": media_ids}
+                        tagged_ids = parse_csv(post_media_tagged_user_ids)
+                        if tagged_ids:
+                            media_payload["tagged_user_ids"] = tagged_ids
+                        payload["media"] = media_payload
+                    if poll_options:
+                        try:
+                            duration = int(post_poll_duration) if post_poll_duration else None
+                        except ValueError:
+                            duration = None
+                        if duration is None:
+                            error = "Poll duration is required when adding poll options."
+                            flash(error, "warning")
+                        else:
+                            poll_payload = {"options": poll_options, "duration_minutes": duration}
+                            if post_poll_reply_settings:
+                                poll_payload["reply_settings"] = post_poll_reply_settings
+                            payload["poll"] = poll_payload
+                    if post_reply_to_id:
+                        reply_payload = {"in_reply_to_tweet_id": post_reply_to_id}
+                        if post_reply_auto_metadata:
+                            reply_payload["auto_populate_reply_metadata"] = True
+                        exclude_ids = parse_csv(post_reply_exclude_user_ids)
+                        if exclude_ids:
+                            reply_payload["exclude_reply_user_ids"] = exclude_ids
+                        payload["reply"] = reply_payload
+                    if post_edit_previous_id:
+                        payload["edit_options"] = {"previous_post_id": post_edit_previous_id}
+
+                    if error is None and not payload:
+                        error = "Provide text or add a poll/media/quote to create a post."
+                        flash(error, "warning")
+                    elif error is None:
+                        flash("Post request started.", "info")
+                        response = create_x_post(payload)
+                        curl_preview = build_curl(
+                            "https://api.x.com/2/tweets",
+                            method="POST",
+                            payload=payload,
+                        )
+        elif action == "delete_post":
+            if not delete_post_id:
+                error = "Please provide a post ID to delete."
+                flash(error, "warning")
+            else:
+                flash("Delete post started.", "info")
+                response = delete_x_post(delete_post_id)
+                curl_preview = build_curl("https://api.x.com/2/tweets/<POST_ID>", method="DELETE")
+        elif action == "repost_post":
+            if not repost_post_id:
+                error = "Please provide a post ID to repost."
+                flash(error, "warning")
+            else:
+                flash("Repost started.", "info")
+                response = repost_x_post(repost_post_id)
+                curl_preview = build_curl(
+                    "https://api.x.com/2/users/<ME>/retweets",
+                    method="POST",
+                    payload={"tweet_id": "<POST_ID>"},
+                )
+        elif action == "unrepost_post":
+            if not repost_post_id:
+                error = "Please provide a post ID to unrepost."
+                flash(error, "warning")
+            else:
+                flash("Unrepost started.", "info")
+                response = unrepost_x_post(repost_post_id)
+                curl_preview = build_curl(
+                    "https://api.x.com/2/users/<ME>/retweets/<POST_ID>",
+                    method="DELETE",
+                )
+        elif action == "lookup_post":
+            if not lookup_post_id:
+                error = "Please provide a post ID or URL."
+                flash(error, "warning")
+            else:
+                resolved_post_id, resolve_error = resolve_x_post_id(lookup_post_id)
+                if resolve_error:
+                    error = resolve_error
+                    flash(resolve_error, "warning")
+                else:
+                    flash("Post lookup started.", "info")
+                    response = get_x_post_by_id(resolved_post_id)
+                    curl_preview = build_curl("https://api.x.com/2/tweets/<POST_ID>")
+        elif action == "lookup_posts":
+            if not lookup_post_ids:
+                error = "Please provide post IDs."
+                flash(error, "warning")
+            else:
+                ids = parse_csv(lookup_post_ids)
+                if not ids:
+                    error = "Please provide post IDs."
+                    flash(error, "warning")
+                else:
+                    flash("Post lookup started.", "info")
+                    response = get_x_posts_by_ids(ids)
+                    curl_preview = build_curl(
+                        "https://api.x.com/2/tweets",
+                        params_dict={"ids": "ID1,ID2"},
+                    )
+        elif action == "quote_tweets":
+            if not quote_post_id:
+                error = "Please provide a post ID."
+                flash(error, "warning")
+            else:
+                try:
+                    max_results = int(quote_max_results) if quote_max_results else 10
+                except ValueError:
+                    max_results = 10
+                max_results = min(max(max_results, 10), 100)
+                exclude = []
+                if quote_exclude_replies:
+                    exclude.append("replies")
+                if quote_exclude_retweets:
+                    exclude.append("retweets")
+                flash("Quote tweet lookup started.", "info")
+                response = get_x_quote_tweets(
+                    quote_post_id,
+                    max_results=max_results,
+                    pagination_token=quote_pagination_token or None,
+                    exclude=exclude or None,
+                )
+                params = {"max_results": max_results}
+                if quote_pagination_token:
+                    params["pagination_token"] = "<PAGINATION_TOKEN>"
+                if exclude:
+                    params["exclude"] = ",".join(exclude)
+                curl_preview = build_curl("https://api.x.com/2/tweets/<POST_ID>/quote_tweets", params_dict=params)
+        elif action == "search_recent":
+            if not search_recent_query:
+                error = "Please provide a search query."
+                flash(error, "warning")
+            else:
+                try:
+                    max_results = int(search_recent_max_results) if search_recent_max_results else 10
+                except ValueError:
+                    max_results = 10
+                max_results = min(max(max_results, 10), 100)
+                flash("Recent search started.", "info")
+                response = search_x_posts_recent(
+                    search_recent_query,
+                    max_results=max_results,
+                    start_time=search_recent_start_time or None,
+                    end_time=search_recent_end_time or None,
+                    since_id=search_recent_since_id or None,
+                    until_id=search_recent_until_id or None,
+                    next_token=search_recent_next_token or None,
+                    pagination_token=search_recent_pagination_token or None,
+                    sort_order=search_recent_sort_order or None,
+                )
+                params = {"query": "<QUERY>", "max_results": max_results}
+                if search_recent_start_time:
+                    params["start_time"] = "<START_TIME>"
+                if search_recent_end_time:
+                    params["end_time"] = "<END_TIME>"
+                if search_recent_since_id:
+                    params["since_id"] = "<SINCE_ID>"
+                if search_recent_until_id:
+                    params["until_id"] = "<UNTIL_ID>"
+                if search_recent_next_token:
+                    params["next_token"] = "<NEXT_TOKEN>"
+                if search_recent_pagination_token:
+                    params["pagination_token"] = "<PAGINATION_TOKEN>"
+                if search_recent_sort_order:
+                    params["sort_order"] = search_recent_sort_order
+                curl_preview = build_curl("https://api.x.com/2/tweets/search/recent", params_dict=params)
+        elif action == "search_all":
+            if not search_all_query:
+                error = "Please provide a search query."
+                flash(error, "warning")
+            else:
+                try:
+                    max_results = int(search_all_max_results) if search_all_max_results else 10
+                except ValueError:
+                    max_results = 10
+                max_results = min(max(max_results, 10), 500)
+                flash("Full-archive search started.", "info")
+                response = search_x_posts_all(
+                    search_all_query,
+                    max_results=max_results,
+                    start_time=search_all_start_time or None,
+                    end_time=search_all_end_time or None,
+                    since_id=search_all_since_id or None,
+                    until_id=search_all_until_id or None,
+                    next_token=search_all_next_token or None,
+                    pagination_token=search_all_pagination_token or None,
+                    sort_order=search_all_sort_order or None,
+                )
+                params = {"query": "<QUERY>", "max_results": max_results}
+                if search_all_start_time:
+                    params["start_time"] = "<START_TIME>"
+                if search_all_end_time:
+                    params["end_time"] = "<END_TIME>"
+                if search_all_since_id:
+                    params["since_id"] = "<SINCE_ID>"
+                if search_all_until_id:
+                    params["until_id"] = "<UNTIL_ID>"
+                if search_all_next_token:
+                    params["next_token"] = "<NEXT_TOKEN>"
+                if search_all_pagination_token:
+                    params["pagination_token"] = "<PAGINATION_TOKEN>"
+                if search_all_sort_order:
+                    params["sort_order"] = search_all_sort_order
+                curl_preview = build_curl("https://api.x.com/2/tweets/search/all", params_dict=params)
+        elif action == "counts_recent":
+            if not counts_recent_query:
+                error = "Please provide a search query."
+                flash(error, "warning")
+            else:
+                flash("Recent counts started.", "info")
+                response = get_x_posts_counts_recent(
+                    counts_recent_query,
+                    start_time=counts_recent_start_time or None,
+                    end_time=counts_recent_end_time or None,
+                    since_id=counts_recent_since_id or None,
+                    until_id=counts_recent_until_id or None,
+                    granularity=counts_recent_granularity or None,
+                    next_token=counts_recent_next_token or None,
+                    pagination_token=counts_recent_pagination_token or None,
+                )
+                params = {"query": "<QUERY>"}
+                if counts_recent_start_time:
+                    params["start_time"] = "<START_TIME>"
+                if counts_recent_end_time:
+                    params["end_time"] = "<END_TIME>"
+                if counts_recent_since_id:
+                    params["since_id"] = "<SINCE_ID>"
+                if counts_recent_until_id:
+                    params["until_id"] = "<UNTIL_ID>"
+                if counts_recent_granularity:
+                    params["granularity"] = counts_recent_granularity
+                if counts_recent_next_token:
+                    params["next_token"] = "<NEXT_TOKEN>"
+                if counts_recent_pagination_token:
+                    params["pagination_token"] = "<PAGINATION_TOKEN>"
+                curl_preview = build_curl("https://api.x.com/2/tweets/counts/recent", params_dict=params)
+        elif action == "counts_all":
+            if not counts_all_query:
+                error = "Please provide a search query."
+                flash(error, "warning")
+            else:
+                flash("Full-archive counts started.", "info")
+                response = get_x_posts_counts_all(
+                    counts_all_query,
+                    start_time=counts_all_start_time or None,
+                    end_time=counts_all_end_time or None,
+                    since_id=counts_all_since_id or None,
+                    until_id=counts_all_until_id or None,
+                    granularity=counts_all_granularity or None,
+                    next_token=counts_all_next_token or None,
+                    pagination_token=counts_all_pagination_token or None,
+                )
+                params = {"query": "<QUERY>"}
+                if counts_all_start_time:
+                    params["start_time"] = "<START_TIME>"
+                if counts_all_end_time:
+                    params["end_time"] = "<END_TIME>"
+                if counts_all_since_id:
+                    params["since_id"] = "<SINCE_ID>"
+                if counts_all_until_id:
+                    params["until_id"] = "<UNTIL_ID>"
+                if counts_all_granularity:
+                    params["granularity"] = counts_all_granularity
+                if counts_all_next_token:
+                    params["next_token"] = "<NEXT_TOKEN>"
+                if counts_all_pagination_token:
+                    params["pagination_token"] = "<PAGINATION_TOKEN>"
+                curl_preview = build_curl("https://api.x.com/2/tweets/counts/all", params_dict=params)
+        elif action == "timeline_posts":
+            identifier = timeline_user_select or timeline_user_identifier
+            if not identifier:
+                error = "Please provide a user ID or username."
+                flash(error, "warning")
+            else:
+                try:
+                    max_results = int(timeline_max_results) if timeline_max_results else 10
+                except ValueError:
+                    max_results = 10
+                max_results = min(max(max_results, 5), 100)
+                resolved_user_id, resolve_error = resolve_x_user_id(identifier)
+                if resolve_error:
+                    error = resolve_error
+                    flash(resolve_error, "warning")
+                else:
+                    exclude = []
+                    if timeline_exclude_replies:
+                        exclude.append("replies")
+                    if timeline_exclude_retweets:
+                        exclude.append("retweets")
+                    flash("Timeline lookup started.", "info")
+                    response = get_x_user_posts(
+                        resolved_user_id,
+                        max_results=max_results,
+                        pagination_token=timeline_pagination_token or None,
+                        since_id=timeline_since_id or None,
+                        until_id=timeline_until_id or None,
+                        start_time=timeline_start_time or None,
+                        end_time=timeline_end_time or None,
+                        exclude=exclude or None,
+                    )
+                    params = {"max_results": max_results}
+                    if timeline_pagination_token:
+                        params["pagination_token"] = "<PAGINATION_TOKEN>"
+                    if timeline_since_id:
+                        params["since_id"] = "<SINCE_ID>"
+                    if timeline_until_id:
+                        params["until_id"] = "<UNTIL_ID>"
+                    if timeline_start_time:
+                        params["start_time"] = "<START_TIME>"
+                    if timeline_end_time:
+                        params["end_time"] = "<END_TIME>"
+                    if exclude:
+                        params["exclude"] = ",".join(exclude)
+                    curl_preview = build_curl("https://api.x.com/2/users/<USER_ID>/tweets", params_dict=params)
+        elif action == "mentions":
+            identifier = mentions_user_select or mentions_user_identifier
+            if not identifier:
+                error = "Please provide a user ID or username."
+                flash(error, "warning")
+            else:
+                try:
+                    max_results = int(mentions_max_results) if mentions_max_results else 10
+                except ValueError:
+                    max_results = 10
+                max_results = min(max(max_results, 5), 100)
+                resolved_user_id, resolve_error = resolve_x_user_id(identifier)
+                if resolve_error:
+                    error = resolve_error
+                    flash(resolve_error, "warning")
+                else:
+                    flash("Mentions lookup started.", "info")
+                    response = get_x_user_mentions(
+                        resolved_user_id,
+                        max_results=max_results,
+                        pagination_token=mentions_pagination_token or None,
+                        since_id=mentions_since_id or None,
+                        until_id=mentions_until_id or None,
+                        start_time=mentions_start_time or None,
+                        end_time=mentions_end_time or None,
+                    )
+                    params = {"max_results": max_results}
+                    if mentions_pagination_token:
+                        params["pagination_token"] = "<PAGINATION_TOKEN>"
+                    if mentions_since_id:
+                        params["since_id"] = "<SINCE_ID>"
+                    if mentions_until_id:
+                        params["until_id"] = "<UNTIL_ID>"
+                    if mentions_start_time:
+                        params["start_time"] = "<START_TIME>"
+                    if mentions_end_time:
+                        params["end_time"] = "<END_TIME>"
+                    curl_preview = build_curl("https://api.x.com/2/users/<USER_ID>/mentions", params_dict=params)
+        elif action == "home_timeline":
+            active_x_user_id = session.get("active_x_user_id")
+            if not active_x_user_id:
+                error = "No active X account is selected."
+                flash(error, "warning")
+            else:
+                try:
+                    max_results = int(home_max_results) if home_max_results else 20
+                except ValueError:
+                    max_results = 20
+                max_results = min(max(max_results, 1), 100)
+                exclude = []
+                if home_exclude_replies:
+                    exclude.append("replies")
+                if home_exclude_retweets:
+                    exclude.append("retweets")
+                flash("Home timeline lookup started.", "info")
+                response = get_x_home_timeline(
+                    active_x_user_id,
+                    max_results=max_results,
+                    pagination_token=home_pagination_token or None,
+                    since_id=home_since_id or None,
+                    until_id=home_until_id or None,
+                    start_time=home_start_time or None,
+                    end_time=home_end_time or None,
+                    exclude=exclude or None,
+                )
+                params = {"max_results": max_results}
+                if home_pagination_token:
+                    params["pagination_token"] = "<PAGINATION_TOKEN>"
+                if home_since_id:
+                    params["since_id"] = "<SINCE_ID>"
+                if home_until_id:
+                    params["until_id"] = "<UNTIL_ID>"
+                if home_start_time:
+                    params["start_time"] = "<START_TIME>"
+                if home_end_time:
+                    params["end_time"] = "<END_TIME>"
+                if exclude:
+                    params["exclude"] = ",".join(exclude)
+                curl_preview = build_curl(
+                    "https://api.x.com/2/users/<ME>/timelines/reverse_chronological",
+                    params_dict=params,
+                )
+        elif action == "reposts_of_me":
+            try:
+                max_results = int(reposts_max_results) if reposts_max_results else 100
+            except ValueError:
+                max_results = 100
+            max_results = min(max(max_results, 1), 100)
+            flash("Reposts of me lookup started.", "info")
+            response = get_x_reposts_of_me(
+                max_results=max_results,
+                pagination_token=reposts_pagination_token or None,
+            )
+            params = {"max_results": max_results}
+            if reposts_pagination_token:
+                params["pagination_token"] = "<PAGINATION_TOKEN>"
+            curl_preview = build_curl("https://api.x.com/2/users/reposts_of_me", params_dict=params)
+        else:
+            response = None
+            error = "Please select a posts action to run."
+            flash("Please select an action first.", "warning")
+
+        def extract_problem(payload: dict) -> dict | None:
+            if not isinstance(payload, dict):
+                return None
+            if payload.get("type") or payload.get("title"):
+                return payload
+            errors = payload.get("errors")
+            if isinstance(errors, list) and errors:
+                return errors[0]
+            return None
+
+        if response is None and error is None:
+            error = "Unable to call X API; check your credentials."
+            result = None
+            flash("Lookup failed. Check your credentials.", "danger")
+        elif response is not None:
+            if isinstance(response, dict):
+                result = response
+                if response.get("error"):
+                    error = response["error"]
+                    flash(response["error"], "warning")
+                else:
+                    flash("Lookup complete.", "success")
+            else:
+                try:
+                    result = response.json()
+                except ValueError:
+                    result = {"raw": response.text}
+                problem = extract_problem(result)
+                if problem and (
+                    problem.get("type") == "https://api.twitter.com/2/problems/client-forbidden"
+                    or problem.get("title") == "Client Forbidden"
+                ):
+                    known_limit = (
+                        "X returned Client Forbidden for this endpoint. "
+                        "Your developer app may need elevated access or OAuth user context."
+                    )
+                    error = known_limit
+                    flash(known_limit, "warning")
+                if response.status_code and response.status_code >= 400:
+                    flash(f"Lookup failed with status {response.status_code}.", "danger")
+                else:
+                    flash("Lookup complete.", "success")
+
+        log_id = session.get("x_last_api_log_id") if response is not None else None
+        if isinstance(response, dict) and response.get("error") and not log_id:
+            log_id = None
+        session["x_posts_lookup_log_id"] = log_id
+        session["x_posts_lookup_error"] = error
+        session["x_posts_lookup_curl"] = curl_preview
+        session["x_posts_known_limit"] = known_limit
+        return redirect(url_for("x_api.posts"))
+
+    return render_template(
+        "x_api/posts.html",
+        post_text=post_text,
+        post_card_uri=post_card_uri,
+        post_direct_message_deep_link=post_direct_message_deep_link,
+        post_quote_tweet_id=post_quote_tweet_id,
+        post_community_id=post_community_id,
+        post_geo_place_id=post_geo_place_id,
+        post_reply_settings=post_reply_settings,
+        post_for_super_followers_only=post_for_super_followers_only,
+        post_nullcast=post_nullcast,
+        post_share_with_followers=post_share_with_followers,
+        post_media_ids=post_media_ids,
+        post_media_tagged_user_ids=post_media_tagged_user_ids,
+        post_media_select=post_media_select,
+        post_poll_options=post_poll_options,
+        post_poll_duration=post_poll_duration,
+        post_poll_reply_settings=post_poll_reply_settings,
+        post_reply_to_id=post_reply_to_id,
+        post_reply_auto_metadata=post_reply_auto_metadata,
+        post_reply_exclude_user_ids=post_reply_exclude_user_ids,
+        post_edit_previous_id=post_edit_previous_id,
+        post_schedule_time=post_schedule_time,
+        delete_post_id=delete_post_id,
+        repost_post_id=repost_post_id,
+        lookup_post_id=lookup_post_id,
+        lookup_post_ids=lookup_post_ids,
+        quote_post_id=quote_post_id,
+        quote_max_results=quote_max_results,
+        quote_pagination_token=quote_pagination_token,
+        quote_exclude_replies=quote_exclude_replies,
+        quote_exclude_retweets=quote_exclude_retweets,
+        search_recent_query=search_recent_query,
+        search_recent_start_time=search_recent_start_time,
+        search_recent_end_time=search_recent_end_time,
+        search_recent_since_id=search_recent_since_id,
+        search_recent_until_id=search_recent_until_id,
+        search_recent_max_results=search_recent_max_results,
+        search_recent_next_token=search_recent_next_token,
+        search_recent_pagination_token=search_recent_pagination_token,
+        search_recent_sort_order=search_recent_sort_order,
+        search_all_query=search_all_query,
+        search_all_start_time=search_all_start_time,
+        search_all_end_time=search_all_end_time,
+        search_all_since_id=search_all_since_id,
+        search_all_until_id=search_all_until_id,
+        search_all_max_results=search_all_max_results,
+        search_all_next_token=search_all_next_token,
+        search_all_pagination_token=search_all_pagination_token,
+        search_all_sort_order=search_all_sort_order,
+        counts_recent_query=counts_recent_query,
+        counts_recent_start_time=counts_recent_start_time,
+        counts_recent_end_time=counts_recent_end_time,
+        counts_recent_since_id=counts_recent_since_id,
+        counts_recent_until_id=counts_recent_until_id,
+        counts_recent_granularity=counts_recent_granularity,
+        counts_recent_next_token=counts_recent_next_token,
+        counts_recent_pagination_token=counts_recent_pagination_token,
+        counts_all_query=counts_all_query,
+        counts_all_start_time=counts_all_start_time,
+        counts_all_end_time=counts_all_end_time,
+        counts_all_since_id=counts_all_since_id,
+        counts_all_until_id=counts_all_until_id,
+        counts_all_granularity=counts_all_granularity,
+        counts_all_next_token=counts_all_next_token,
+        counts_all_pagination_token=counts_all_pagination_token,
+        timeline_user_identifier=timeline_user_identifier,
+        timeline_user_select=timeline_user_select,
+        timeline_max_results=timeline_max_results,
+        timeline_pagination_token=timeline_pagination_token,
+        timeline_since_id=timeline_since_id,
+        timeline_until_id=timeline_until_id,
+        timeline_start_time=timeline_start_time,
+        timeline_end_time=timeline_end_time,
+        timeline_exclude_replies=timeline_exclude_replies,
+        timeline_exclude_retweets=timeline_exclude_retweets,
+        mentions_user_identifier=mentions_user_identifier,
+        mentions_user_select=mentions_user_select,
+        mentions_max_results=mentions_max_results,
+        mentions_pagination_token=mentions_pagination_token,
+        mentions_since_id=mentions_since_id,
+        mentions_until_id=mentions_until_id,
+        mentions_start_time=mentions_start_time,
+        mentions_end_time=mentions_end_time,
+        home_max_results=home_max_results,
+        home_pagination_token=home_pagination_token,
+        home_since_id=home_since_id,
+        home_until_id=home_until_id,
+        home_start_time=home_start_time,
+        home_end_time=home_end_time,
+        home_exclude_replies=home_exclude_replies,
+        home_exclude_retweets=home_exclude_retweets,
+        reposts_max_results=reposts_max_results,
+        reposts_pagination_token=reposts_pagination_token,
+        result=result,
+        error=error,
+        known_limit=known_limit,
+        curl_preview=curl_preview,
+        existing_users=XUser.query.order_by(XUser.username.asc()).limit(200).all(),
+        existing_posts=XPost.query.order_by(XPost.created_at.desc()).limit(200).all(),
+        media_uploads=XMediaUpload.query.filter_by(user_id=session.get("user_id")).order_by(XMediaUpload.created_at.desc()).limit(200).all(),
+        tweet_fields=_filter_fields(TWEET_FIELDS),
+        user_fields=_filter_fields(USER_FIELDS),
+        media_fields=_filter_fields(MEDIA_FIELDS),
+        poll_fields=_filter_fields(POLL_FIELDS),
+        place_fields=_filter_fields(PLACE_FIELDS),
+        search_count_fields=_filter_fields(SEARCH_COUNT_FIELDS),
+    )
 
 
 @bp.route("/likes", methods=["GET", "POST"])

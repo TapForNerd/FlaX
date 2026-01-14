@@ -130,6 +130,19 @@ NEWS_FIELDS = [
     "updated_at",
 ]
 
+ACTIVITY_EVENT_TYPES = [
+    "profile.update.bio",
+    "profile.update.profile_picture",
+    "profile.update.banner_picture",
+    "profile.update.geo",
+    "profile.update.url",
+    "profile.update.screenname",
+    "profile.update.verified_badge",
+    "follow.follow",
+    "follow.unfollow",
+    "news.new",
+]
+
 USAGE_FIELDS = [
     "cap_reset_day",
     "daily_client_app_usage",
@@ -141,6 +154,47 @@ USAGE_FIELDS = [
 
 TWEET_EXPANSIONS = [
     "author_id",
+]
+
+MEDIA_FIELDS = [
+    "alt_text",
+    "duration_ms",
+    "height",
+    "media_key",
+    "non_public_metrics",
+    "organic_metrics",
+    "preview_image_url",
+    "promoted_metrics",
+    "public_metrics",
+    "type",
+    "url",
+    "variants",
+    "width",
+]
+
+POLL_FIELDS = [
+    "duration_minutes",
+    "end_datetime",
+    "id",
+    "options",
+    "voting_status",
+]
+
+PLACE_FIELDS = [
+    "contained_within",
+    "country",
+    "country_code",
+    "full_name",
+    "geo",
+    "id",
+    "name",
+    "place_type",
+]
+
+SEARCH_COUNT_FIELDS = [
+    "end",
+    "start",
+    "tweet_count",
 ]
 
 IMAGE_FORMATS = {
@@ -237,6 +291,16 @@ def _upsert_x_post(payload: Mapping[str, Any]) -> XPost | None:
     record.raw_post_data = payload
     _upsert_context_annotations(record.id, payload.get("context_annotations") or [])
     return record
+
+
+def _store_post_payload(payload: Mapping[str, Any]) -> None:
+    includes = payload.get("includes") or {}
+    for user in includes.get("users", []) or []:
+        _upsert_x_user(user)
+    for post in payload.get("data", []) or []:
+        _upsert_x_post(post)
+    for post in includes.get("tweets", []) or []:
+        _upsert_x_post(post)
 
 
 def _upsert_x_space(payload: Mapping[str, Any]) -> XSpace | None:
@@ -1620,6 +1684,787 @@ def unlike_x_post(post_id: str) -> Any:
     return response
 
 
+def create_x_post(payload: Mapping[str, Any]) -> Any:
+    response = call_x_api_with_refresh(
+        requests.post,
+        "https://api.x.com/2/tweets",
+        json=payload,
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/tweets",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def delete_x_post(post_id: str) -> Any:
+    response = call_x_api_with_refresh(
+        requests.delete,
+        f"https://api.x.com/2/tweets/{post_id}",
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "DELETE",
+            f"https://api.x.com/2/tweets/{post_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def repost_x_post(post_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "POST",
+            "https://api.x.com/2/users/me/retweets",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.post,
+        f"https://api.x.com/2/users/{x_user_id}/retweets",
+        json={"tweet_id": str(post_id)},
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "POST",
+            f"https://api.x.com/2/users/{x_user_id}/retweets",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def unrepost_x_post(post_id: str) -> Any:
+    x_user_id = _get_active_x_user_id()
+    if not x_user_id:
+        payload = {"error": "No active X account available."}
+        _log_api_request(
+            "DELETE",
+            "https://api.x.com/2/users/me/retweets",
+            None,
+            json.dumps(payload),
+            None,
+            commit=True,
+        )
+        print(json.dumps(payload, indent=4))
+        return payload
+
+    response = call_x_api_with_refresh(
+        requests.delete,
+        f"https://api.x.com/2/users/{x_user_id}/retweets/{post_id}",
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "DELETE",
+            f"https://api.x.com/2/users/{x_user_id}/retweets/{post_id}",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    print(response.text)
+    db.session.commit()
+    return response
+
+
+def get_x_reposts_of_me(
+    max_results: int = 100,
+    pagination_token: str | None = None,
+) -> Any:
+    response = call_x_api_with_refresh(
+        requests.get,
+        "https://api.x.com/2/users/reposts_of_me",
+        params={
+            "max_results": max_results,
+            "pagination_token": pagination_token,
+            "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+            "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+            "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+            "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+            "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+        },
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            "https://api.x.com/2/users/reposts_of_me",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_quote_tweets(
+    post_id: str,
+    max_results: int = 10,
+    pagination_token: str | None = None,
+    exclude: list[str] | None = None,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    params = {
+        "max_results": max_results,
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+        "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+        "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+    }
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+    if exclude:
+        params["exclude"] = ",".join(exclude)
+
+    response = requests.get(
+        f"https://api.x.com/2/tweets/{post_id}/quote_tweets",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_post_by_id(post_id: str) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    response = requests.get(
+        f"https://api.x.com/2/tweets/{post_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        params={
+            "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+            "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+            "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+            "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+            "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+        },
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_posts_by_ids(post_ids: list[str]) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    response = requests.get(
+        "https://api.x.com/2/tweets",
+        headers={"Authorization": f"Bearer {token}"},
+        params={
+            "ids": ",".join(post_ids),
+            "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+            "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+            "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+            "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+            "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+            "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+        },
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def search_x_posts_recent(
+    query: str,
+    max_results: int = 10,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    since_id: str | None = None,
+    until_id: str | None = None,
+    next_token: str | None = None,
+    pagination_token: str | None = None,
+    sort_order: str | None = None,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    params = {
+        "query": query,
+        "max_results": max_results,
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+        "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+        "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+    }
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+    if since_id:
+        params["since_id"] = since_id
+    if until_id:
+        params["until_id"] = until_id
+    if next_token:
+        params["next_token"] = next_token
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+    if sort_order:
+        params["sort_order"] = sort_order
+
+    response = requests.get(
+        "https://api.x.com/2/tweets/search/recent",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def search_x_posts_all(
+    query: str,
+    max_results: int = 10,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    since_id: str | None = None,
+    until_id: str | None = None,
+    next_token: str | None = None,
+    pagination_token: str | None = None,
+    sort_order: str | None = None,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    params = {
+        "query": query,
+        "max_results": max_results,
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+        "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+        "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+    }
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+    if since_id:
+        params["since_id"] = since_id
+    if until_id:
+        params["until_id"] = until_id
+    if next_token:
+        params["next_token"] = next_token
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+    if sort_order:
+        params["sort_order"] = sort_order
+
+    response = requests.get(
+        "https://api.x.com/2/tweets/search/all",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_posts_counts_recent(
+    query: str,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    since_id: str | None = None,
+    until_id: str | None = None,
+    granularity: str | None = None,
+    next_token: str | None = None,
+    pagination_token: str | None = None,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    params = {
+        "query": query,
+        "search_count.fields": ",".join(_filter_fields(SEARCH_COUNT_FIELDS)),
+    }
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+    if since_id:
+        params["since_id"] = since_id
+    if until_id:
+        params["until_id"] = until_id
+    if granularity:
+        params["granularity"] = granularity
+    if next_token:
+        params["next_token"] = next_token
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+
+    response = requests.get(
+        "https://api.x.com/2/tweets/counts/recent",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    db.session.commit()
+    return response
+
+
+def get_x_posts_counts_all(
+    query: str,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    since_id: str | None = None,
+    until_id: str | None = None,
+    granularity: str | None = None,
+    next_token: str | None = None,
+    pagination_token: str | None = None,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    params = {
+        "query": query,
+        "search_count.fields": ",".join(_filter_fields(SEARCH_COUNT_FIELDS)),
+    }
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+    if since_id:
+        params["since_id"] = since_id
+    if until_id:
+        params["until_id"] = until_id
+    if granularity:
+        params["granularity"] = granularity
+    if next_token:
+        params["next_token"] = next_token
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+
+    response = requests.get(
+        "https://api.x.com/2/tweets/counts/all",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    db.session.commit()
+    return response
+
+
+def get_x_user_posts(
+    user_id: str,
+    max_results: int = 10,
+    pagination_token: str | None = None,
+    since_id: str | None = None,
+    until_id: str | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    exclude: list[str] | None = None,
+) -> Any:
+    params = {
+        "max_results": max_results,
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+        "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+        "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+    }
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+    if since_id:
+        params["since_id"] = since_id
+    if until_id:
+        params["until_id"] = until_id
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+    if exclude:
+        params["exclude"] = ",".join(exclude)
+
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/tweets",
+        params=params,
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/tweets",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_user_mentions(
+    user_id: str,
+    max_results: int = 10,
+    pagination_token: str | None = None,
+    since_id: str | None = None,
+    until_id: str | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+) -> Any:
+    params = {
+        "max_results": max_results,
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+        "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+        "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+    }
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+    if since_id:
+        params["since_id"] = since_id
+    if until_id:
+        params["until_id"] = until_id
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/mentions",
+        params=params,
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/mentions",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
+def get_x_home_timeline(
+    user_id: str,
+    max_results: int = 20,
+    pagination_token: str | None = None,
+    since_id: str | None = None,
+    until_id: str | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    exclude: list[str] | None = None,
+) -> Any:
+    params = {
+        "max_results": max_results,
+        "tweet.fields": ",".join(_filter_fields(TWEET_FIELDS)),
+        "expansions": ",".join(_filter_fields(TWEET_EXPANSIONS)),
+        "user.fields": ",".join(_filter_fields(USER_FIELDS)),
+        "media.fields": ",".join(_filter_fields(MEDIA_FIELDS)),
+        "poll.fields": ",".join(_filter_fields(POLL_FIELDS)),
+        "place.fields": ",".join(_filter_fields(PLACE_FIELDS)),
+    }
+    if pagination_token:
+        params["pagination_token"] = pagination_token
+    if since_id:
+        params["since_id"] = since_id
+    if until_id:
+        params["until_id"] = until_id
+    if start_time:
+        params["start_time"] = start_time
+    if end_time:
+        params["end_time"] = end_time
+    if exclude:
+        params["exclude"] = ",".join(exclude)
+
+    response = call_x_api_with_refresh(
+        requests.get,
+        f"https://api.x.com/2/users/{user_id}/timelines/reverse_chronological",
+        params=params,
+        timeout=10,
+    )
+    if isinstance(response, dict):
+        _log_api_request(
+            "GET",
+            f"https://api.x.com/2/users/{user_id}/timelines/reverse_chronological",
+            None,
+            json.dumps(response),
+            None,
+            commit=True,
+        )
+        print(json.dumps(response, indent=4))
+        return response
+
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    payload = response.json() if response.headers.get("Content-Type", "").startswith("application/json") else None
+    if not payload or "data" not in payload:
+        print(response.text)
+        db.session.commit()
+        return response
+
+    _store_post_payload(payload)
+    db.session.commit()
+
+    print(json.dumps(payload, indent=4))
+    return response
+
+
 def get_x_community_by_id(community_id: str) -> Any:
     response = call_x_api_with_refresh(
         requests.get,
@@ -1850,6 +2695,121 @@ def get_x_news_by_id(news_id: str) -> Any:
     db.session.commit()
 
     print(json.dumps(payload, indent=4))
+    return response
+
+
+def create_x_activity_subscription(
+    event_type: str,
+    filter_payload: Mapping[str, Any],
+    tag: str | None = None,
+    webhook_id: str | None = None,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    body = {"event_type": event_type, "filter": filter_payload}
+    if tag:
+        body["tag"] = tag
+    if webhook_id:
+        body["webhook_id"] = webhook_id
+
+    response = requests.post(
+        "https://api.x.com/2/activity/subscriptions",
+        headers={"Authorization": f"Bearer {token}"},
+        json=body,
+        timeout=10,
+    )
+    _log_api_request(
+        "POST",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    db.session.commit()
+    return response
+
+
+def get_x_activity_subscriptions() -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    response = requests.get(
+        "https://api.x.com/2/activity/subscriptions",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=10,
+    )
+    _log_api_request(
+        "GET",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    db.session.commit()
+    return response
+
+
+def update_x_activity_subscription(
+    subscription_id: str,
+    tag: str | None = None,
+    webhook_id: str | None = None,
+) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    body: dict[str, Any] = {}
+    if tag:
+        body["tag"] = tag
+    if webhook_id:
+        body["webhook_id"] = webhook_id
+
+    response = requests.put(
+        f"https://api.x.com/2/activity/subscriptions/{subscription_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        json=body,
+        timeout=10,
+    )
+    _log_api_request(
+        "PUT",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    db.session.commit()
+    return response
+
+
+def delete_x_activity_subscription(subscription_id: str) -> Any:
+    token = get_app_var("X_BEARER_TOKEN")
+    if not token:
+        payload = {"error": "Missing X_BEARER_TOKEN; update .env or app_vars before calling."}
+        print(payload["error"])
+        return payload
+
+    response = requests.delete(
+        f"https://api.x.com/2/activity/subscriptions/{subscription_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=10,
+    )
+    _log_api_request(
+        "DELETE",
+        response.url,
+        response.status_code,
+        response.text,
+        dict(response.headers),
+    )
+    db.session.commit()
     return response
 
 

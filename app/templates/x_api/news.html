@@ -1,0 +1,460 @@
+{% extends "base.html" %}
+
+{% block title %}X News{% endblock %}
+
+{% block content %}
+
+<style>
+  .x-card {
+    border: 0;
+    border-radius: 1rem;
+    position: relative;
+    overflow: hidden;
+  }
+  .x-muted { color: rgba(0,0,0,.60); }
+  .x-pill {
+    border: 1px solid rgba(0,0,0,.10);
+    border-radius: 999px;
+    padding: .35rem .65rem;
+    font-size: .85rem;
+    background: #fff;
+  }
+  .x-kpi {
+    border: 1px solid rgba(0,0,0,.08);
+    border-radius: .9rem;
+    padding: .85rem .9rem;
+    background: #fff;
+  }
+  .x-kpi .label { font-size: .8rem; color: rgba(0,0,0,.55); }
+  .x-kpi .value { font-size: 1.15rem; font-weight: 700; line-height: 1.1; }
+
+  pre.x-pre {
+    max-height: 340px;
+    overflow: auto;
+    background: #0b1020;
+    color: #d7e2ff;
+    border-radius: .75rem;
+    padding: 1rem;
+    font-size: .85rem;
+    margin: 0;
+  }
+  .table td, .table th { vertical-align: middle; }
+</style>
+
+<div class="container-fluid py-4">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <div class="toast-container position-fixed top-0 end-0 p-3" style="z-index: 1080;">
+        {% for category, message in messages %}
+          <div class="toast text-bg-{{ category }} border-0 mb-2" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="d-flex">
+              <div class="toast-body">{{ message }}</div>
+              <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+  {% endwith %}
+
+  <div class="d-flex align-items-end justify-content-between mb-3">
+    <div>
+      <h3 class="mb-1">X News</h3>
+      <div class="x-muted">Look up a news story by ID or search headlines.</div>
+    </div>
+  </div>
+
+  <div class="row g-4">
+    {# LEFT: Controls #}
+    <div class="col-lg-5">
+      <div class="card x-card shadow-sm">
+        <div class="card-body p-3 p-md-4">
+          <div class="d-flex align-items-center justify-content-between mb-3">
+            <div>
+              <h5 class="mb-1">News toolbox</h5>
+              <div class="x-muted small">Pick an action below.</div>
+            </div>
+            <span class="badge text-bg-light border">X API</span>
+          </div>
+
+          {% if known_limit %}
+            <div class="alert alert-warning d-flex align-items-start gap-2 mb-3">
+              <div class="fw-semibold">Known limitation:</div>
+              <div class="flex-grow-1">{{ known_limit }}</div>
+            </div>
+          {% endif %}
+          {% if error %}
+            <div class="alert alert-warning d-flex align-items-start gap-2 mb-3">
+              <div class="fw-semibold">Heads up:</div>
+              <div class="flex-grow-1">{{ error }}</div>
+            </div>
+          {% endif %}
+
+          <div class="accordion" id="newsAccordion">
+            {# Get News by ID #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hNewsById">
+                <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#cNewsById" aria-expanded="true" aria-controls="cNewsById">
+                  Get news by ID
+                </button>
+              </h2>
+              <div id="cNewsById" class="accordion-collapse collapse show" aria-labelledby="hNewsById" data-bs-parent="#newsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">News ID</label>
+                    <div class="input-group">
+                      <input
+                        type="text"
+                        name="news_id"
+                        value="{{ news_id or '' }}"
+                        class="form-control"
+                        placeholder="1989418137272422538"
+                        required
+                      >
+                      <button class="btn btn-outline-dark" type="submit" name="news_action" value="news_by_id">Lookup</button>
+                    </div>
+                    <div class="form-text mt-2">Includes all News fields by default.</div>
+                  </form>
+                </div>
+              </div>
+            </div>
+
+            {# Search News #}
+            <div class="accordion-item border-0">
+              <h2 class="accordion-header" id="hSearchNews">
+                <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#cSearchNews" aria-expanded="false" aria-controls="cSearchNews">
+                  Search News
+                </button>
+              </h2>
+              <div id="cSearchNews" class="accordion-collapse collapse" aria-labelledby="hSearchNews" data-bs-parent="#newsAccordion">
+                <div class="accordion-body pt-3">
+                  <form method="post">
+                    <label class="form-label small x-muted mb-1">Search query</label>
+                    <input
+                      type="text"
+                      name="search_query"
+                      value="{{ search_query or '' }}"
+                      class="form-control"
+                      placeholder="crypto"
+                      required
+                    >
+                    <div class="row g-2 mt-2">
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Max results</label>
+                        <input
+                          type="number"
+                          name="search_max_results"
+                          min="1"
+                          max="100"
+                          class="form-control"
+                          value="{{ search_max_results or '' }}"
+                          placeholder="10"
+                        >
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label small x-muted mb-1">Max age (hours)</label>
+                        <input
+                          type="number"
+                          name="search_max_age_hours"
+                          min="1"
+                          max="720"
+                          class="form-control"
+                          value="{{ search_max_age_hours or '' }}"
+                          placeholder="168"
+                        >
+                      </div>
+                    </div>
+                    <div class="form-text mt-2">Requires X API access.</div>
+                    <button class="btn btn-outline-dark mt-2" type="submit" name="news_action" value="search_news">Search</button>
+                  </form>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {% if result %}
+            <hr class="my-4">
+
+            <div class="row g-2">
+              <div class="col-12">
+                <button
+                  class="btn btn-link text-decoration-none p-0"
+                  type="button"
+                  data-bs-toggle="collapse"
+                  data-bs-target="#rawResponse"
+                  aria-expanded="false"
+                  aria-controls="rawResponse"
+                >
+                  View raw X API response
+                </button>
+              </div>
+              <div class="col-12">
+                <div id="rawResponse" class="collapse mt-2">
+                  <pre class="x-pre">{{ result | tojson(indent=2) }}</pre>
+                </div>
+              </div>
+            </div>
+
+            {% if curl_preview %}
+              <div class="row g-2 mt-3">
+                <div class="col-12 d-flex align-items-center justify-content-between">
+                  <button
+                    class="btn btn-link text-decoration-none p-0"
+                    type="button"
+                    data-bs-toggle="collapse"
+                    data-bs-target="#curlPreview"
+                    aria-expanded="false"
+                    aria-controls="curlPreview"
+                  >
+                    View sanitized curl command
+                  </button>
+                  <button
+                    class="btn btn-sm btn-outline-dark"
+                    type="button"
+                    data-copy-target="#curlPreviewBox"
+                    onclick="
+                      const el = document.querySelector(this.getAttribute('data-copy-target'));
+                      if (!el) return;
+                      const text = el.textContent || '';
+                      navigator.clipboard.writeText(text);
+                      const original = this.textContent;
+                      this.textContent = 'Copied!';
+                      setTimeout(() => this.textContent = original, 1200);
+                    "
+                  >
+                    Copy curl
+                  </button>
+                </div>
+                <div class="col-12">
+                  <div id="curlPreview" class="collapse mt-2">
+                    <textarea
+                      id="curlPreviewBox"
+                      class="form-control font-monospace"
+                      rows="6"
+                      style="width: 100%; resize: vertical;"
+                    >{{ curl_preview }}</textarea>
+                    <div class="form-text">
+                      Sanitized curl is safe to share. Click "Copy curl" to copy the full command.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            {% endif %}
+          {% endif %}
+        </div>
+      </div>
+    </div>
+
+    {# RIGHT: Results #}
+    <div class="col-lg-7">
+      {% if result %}
+        {% set stories = [] %}
+
+        {% if result.data is mapping %}
+          {% set stories = [result.data] %}
+        {% elif result.data is sequence %}
+          {% set stories = result.data %}
+        {% endif %}
+
+        <div class="row g-4">
+          {% if result.meta is mapping %}
+            <div class="col-12">
+              <div class="card x-card shadow-sm">
+                <div class="card-body">
+                  <div class="x-muted small mb-2">Response metadata</div>
+                  <div class="row g-3">
+                    <div class="col-6 col-md-4">
+                      <div class="x-kpi">
+                        <div class="label">Result count</div>
+                        <div class="value">{{ result.meta.result_count | default(stories | length) }}</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          {% endif %}
+
+          {% if stories|length == 0 %}
+            <div class="col-12">
+              <div class="card x-card shadow-sm">
+                <div class="card-body text-center text-muted">
+                  No results returned for this request.
+                </div>
+              </div>
+            </div>
+          {% endif %}
+
+          {% for story in stories %}
+            <div class="col-12">
+              <div class="card x-card shadow-sm">
+                <div class="card-body">
+                  <div class="d-flex align-items-start justify-content-between">
+                    <div class="pe-3">
+                      <div class="x-muted small mb-2">News story</div>
+                      <h4 class="mb-2">{{ story.name or "Untitled story" }}</h4>
+                      <div class="d-flex flex-wrap gap-2">
+                        {% if story.category %}
+                          <span class="x-pill">{{ story.category }}</span>
+                        {% endif %}
+                        {% if story.last_updated_at_ms %}
+                          <span class="x-pill">Updated {{ story.last_updated_at_ms }}</span>
+                        {% endif %}
+                      </div>
+                      {% if story.summary %}
+                        <p class="mt-3 mb-0 x-muted">{{ story.summary }}</p>
+                      {% endif %}
+                      {% if story.hook %}
+                        <p class="mt-3 mb-0">{{ story.hook }}</p>
+                      {% endif %}
+                    </div>
+                    <div class="d-flex flex-column gap-2" style="min-width: 140px;">
+                      {% if story.id or story.rest_id %}
+                        <button class="btn btn-outline-dark" type="button"
+                          onclick="navigator.clipboard.writeText('{{ story.id or story.rest_id }}')"
+                        >
+                          Copy ID
+                        </button>
+                      {% endif %}
+                    </div>
+                  </div>
+
+                  {% if story.contexts %}
+                    <hr class="my-4">
+                    <div class="row g-3">
+                      <div class="col-12">
+                        <div class="x-muted small mb-2">Contexts</div>
+                        {% set topics = story.contexts.topics or [] %}
+                        {% if topics %}
+                          <div class="d-flex flex-wrap gap-2">
+                            {% for topic in topics %}
+                              <span class="x-pill">{{ topic }}</span>
+                            {% endfor %}
+                          </div>
+                        {% else %}
+                          <div class="text-muted">No topics listed.</div>
+                        {% endif %}
+                      </div>
+                    </div>
+                  {% endif %}
+                </div>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      {% else %}
+        <div class="card x-card shadow-sm">
+          <div class="card-body text-center text-muted">
+            Run a news lookup to see results here.
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="mt-5">
+    <div class="d-flex align-items-center justify-content-between mb-3">
+      <div>
+        <h5 class="mb-1">Lookup history</h5>
+        <div class="x-muted small">Recently saved news stories.</div>
+      </div>
+    </div>
+    <div class="card x-card shadow-sm">
+      <div class="card-body">
+        <div class="table-responsive">
+          <table class="table table-sm align-middle mb-0">
+            <thead>
+              <tr>
+                <th>Fetched</th>
+                <th>News ID</th>
+                <th>Source</th>
+                <th>Headline</th>
+                <th>Category</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% if recent_news %}
+                {% for row in recent_news %}
+                  <tr>
+                    <td class="text-muted small">{{ row.fetched_at }}</td>
+                    <td>
+                      <button
+                        class="btn btn-link p-0 text-decoration-none"
+                        type="button"
+                        data-bs-toggle="modal"
+                        data-bs-target="#newsModal{{ row.id }}"
+                      >{{ row.news_id }}</button>
+                    </td>
+                    <td class="text-muted small">{{ row.source }}</td>
+                    <td>{{ row.name or "Untitled" }}</td>
+                    <td class="text-muted small">{{ row.category or "—" }}</td>
+                  </tr>
+                  <div class="modal fade" id="newsModal{{ row.id }}" tabindex="-1" aria-hidden="true">
+                    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+                      <div class="modal-content">
+                        <div class="modal-header">
+                          <div>
+                            <div class="x-muted small mb-1">News story {{ row.news_id }}</div>
+                            <h5 class="modal-title">{{ row.name or "Untitled story" }}</h5>
+                          </div>
+                          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                          <div class="d-flex flex-wrap gap-2 mb-3">
+                            {% if row.category %}
+                              <span class="x-pill">{{ row.category }}</span>
+                            {% endif %}
+                            <span class="x-pill">Source: {{ row.source }}</span>
+                            {% if row.last_updated_at %}
+                              <span class="x-pill">Updated {{ row.last_updated_at }}</span>
+                            {% endif %}
+                            <span class="x-pill">Fetched {{ row.fetched_at }}</span>
+                          </div>
+                          {% if row.summary %}
+                            <h6>Summary</h6>
+                            <p class="x-muted">{{ row.summary }}</p>
+                          {% endif %}
+                          {% if row.hook %}
+                            <h6>Hook</h6>
+                            <p>{{ row.hook }}</p>
+                          {% endif %}
+                          {% if row.disclaimer %}
+                            <h6>Disclaimer</h6>
+                            <p class="x-muted">{{ row.disclaimer }}</p>
+                          {% endif %}
+                          <h6 class="mt-4">Raw data</h6>
+                          <pre class="x-pre">{{ row.raw_news_data | tojson(indent=2) }}</pre>
+                        </div>
+                        <div class="modal-footer">
+                          <button
+                            class="btn btn-outline-dark"
+                            type="button"
+                            onclick="navigator.clipboard.writeText('{{ row.news_id }}')"
+                          >Copy ID</button>
+                          <button type="button" class="btn btn-dark" data-bs-dismiss="modal">Close</button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                {% endfor %}
+              {% else %}
+                <tr>
+                  <td colspan="5" class="text-center text-muted">No news lookups saved yet.</td>
+                </tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    const toastElList = [].slice.call(document.querySelectorAll('.toast'));
+    toastElList.map((toastEl) => new bootstrap.Toast(toastEl).show());
+  });
+</script>
+
+{% endblock %}
